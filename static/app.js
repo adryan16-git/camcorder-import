@@ -125,10 +125,16 @@ async function scan_camera() {
   const mounts = selected_mounts();
   if (!mounts.length) return;
 
-  const btn = document.getElementById('btn-scan');
+  const btn        = document.getElementById('btn-scan');
+  const status_row = document.getElementById('scan-status-row');
+  const status_msg = document.getElementById('scan-status-msg');
+  const status_txt = document.getElementById('scan-status');
+
   btn.disabled = true;
   btn.textContent = 'Scanning…';
-  document.getElementById('scan-status').textContent = 'Running ffprobe on camera files…';
+  status_row.classList.remove('hidden');
+  status_msg.textContent = 'Running ffprobe on camera files…';
+  status_txt.classList.add('hidden');
   document.getElementById('scan-results').classList.add('hidden');
   document.getElementById('import-actions').classList.add('hidden');
 
@@ -142,10 +148,12 @@ async function scan_camera() {
     scan_recordings = await res.json();
     render_scan_results();
   } catch (e) {
-    document.getElementById('scan-status').textContent = `Scan failed: ${e.message}`;
+    status_msg.textContent = `Scan failed: ${e.message}`;
   } finally {
     btn.disabled = false;
     btn.textContent = 'Scan Camera';
+    status_row.classList.add('hidden');
+    status_txt.classList.remove('hidden');
   }
 }
 
@@ -329,11 +337,16 @@ function apply_catalog_filters() {
   const year    = document.getElementById('filter-year').value;
   const source  = document.getElementById('filter-source').value;
   const glacier = document.getElementById('filter-glacier').value;
+  const search  = document.getElementById('filter-search').value.trim().toLowerCase();
 
   let recs = catalog_data.recordings;
   if (year)    recs = recs.filter(r => r.recorded_at?.startsWith(year));
   if (source)  recs = recs.filter(r => r.source === source);
   if (glacier) recs = recs.filter(r => String(r.glacier_archived) === glacier);
+  if (search)  recs = recs.filter(r =>
+    (r.recorded_at || '').toLowerCase().includes(search) ||
+    (r.path || '').toLowerCase().includes(search)
+  );
 
   const tbody = document.getElementById('catalog-tbody');
   tbody.innerHTML = '';
@@ -645,6 +658,11 @@ document.getElementById('btn-cancel-catalog').addEventListener('click', cancel_j
 document.getElementById('filter-year').addEventListener('change', apply_catalog_filters);
 document.getElementById('filter-source').addEventListener('change', apply_catalog_filters);
 document.getElementById('filter-glacier').addEventListener('change', apply_catalog_filters);
+document.getElementById('filter-search').addEventListener('input', apply_catalog_filters);
+
+document.getElementById('btn-goto-settings').addEventListener('click', () => {
+  document.querySelector('.tab-btn[data-tab="settings"]').click();
+});
 
 // ---------------------------------------------------------------------------
 // Init

@@ -30,17 +30,23 @@
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header">
-        <h2>Archive Destination</h2>
+    <div id="archive-infobox" class="info-box">
+      <span class="info-icon">&#x1F4C2;</span>
+      <div class="info-content">
+        <div class="info-label">Archive destination</div>
+        <div id="archive-display" class="info-value">Loading…</div>
       </div>
-      <p id="archive-display" class="archive-path muted">Loading...</p>
+      <button type="button" id="btn-goto-settings" class="btn-link">Change in Settings &#x2192;</button>
     </div>
 
     <div class="card">
       <div class="card-header">
         <h2>Preview</h2>
         <button id="btn-scan" class="btn-secondary" disabled>Scan Camera</button>
+      </div>
+      <div id="scan-status-row" class="build-status-row hidden">
+        <span id="scan-spinner" class="spinner"></span>
+        <span id="scan-status-msg" class="muted">Scanning…</span>
       </div>
       <div id="scan-status" class="muted">Select volumes above, then click Scan.</div>
       <div id="scan-results" class="hidden">
@@ -127,6 +133,9 @@
               <option value="true">Archived</option>
               <option value="false">Not archived</option>
             </select>
+          </label>
+          <label class="filter-search">
+            <input id="filter-search" type="search" placeholder="Search date or path…">
           </label>
         </div>
       </div>

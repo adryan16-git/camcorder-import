@@ -122,7 +122,33 @@ button { cursor: pointer; font-family: inherit; font-size: 14px; border-radius: 
 .camera-label { font-weight: 500; }
 .camera-meta { color: var(--muted); font-size: 13px; margin-left: auto; }
 
-.archive-path { padding: 4px 0; font-family: monospace; font-size: 13px; }
+/* -------------------------------------------------------------- info box */
+.info-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.info-icon { font-size: 20px; flex-shrink: 0; }
+.info-content { flex: 1; min-width: 0; }
+.info-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #3b82f6; margin-bottom: 2px; }
+.info-value { font-family: monospace; font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.btn-link {
+  background: none;
+  border: none;
+  color: #2563eb;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 0;
+  white-space: nowrap;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.btn-link:hover { color: #1d4ed8; }
 
 /* ------------------------------------------------------------- scan results */
 .recordings-table {
@@ -236,6 +262,17 @@ button { cursor: pointer; font-family: inherit; font-size: 14px; border-radius: 
   font-size: 13px;
   color: var(--muted);
 }
+.filter-search { flex: 1; min-width: 160px; }
+.filter-search input[type=search] {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+  background: var(--surface);
+  margin-left: 6px;
+}
+.filter-search input[type=search]:focus { outline: 2px solid var(--primary); border-color: transparent; }
 .filter-row select {
   margin-left: 6px;
   padding: 4px 8px;
