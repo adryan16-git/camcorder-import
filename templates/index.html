@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Canon Import Tool</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header>
+    <h1>&#x1F3A5; Canon Import Tool</h1>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="import">Import</button>
+    <button class="tab-btn" data-tab="catalog">Catalog</button>
+    <button class="tab-btn" data-tab="settings">Settings</button>
+  </nav>
+
+  <!-- ================================================================ IMPORT -->
+  <section id="tab-import" class="tab-panel active">
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Camera Volumes</h2>
+        <button id="btn-detect" class="btn-secondary">Detect Camera</button>
+      </div>
+      <div id="camera-list" class="camera-list">
+        <p class="muted">Click "Detect Camera" to scan for connected volumes.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Archive Destination</h2>
+      </div>
+      <p id="archive-display" class="archive-path muted">Loading...</p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Preview</h2>
+        <button id="btn-scan" class="btn-secondary" disabled>Scan Camera</button>
+      </div>
+      <div id="scan-status" class="muted">Select volumes above, then click Scan.</div>
+      <div id="scan-results" class="hidden">
+        <table class="recordings-table">
+          <thead>
+            <tr>
+              <th>Recorded</th>
+              <th>Duration</th>
+              <th>Size</th>
+              <th>Files</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="scan-tbody"></tbody>
+        </table>
+        <div id="scan-summary" class="scan-summary"></div>
+      </div>
+    </div>
+
+    <div id="import-actions" class="card hidden">
+      <button id="btn-import" class="btn-primary btn-large">Confirm &amp; Import</button>
+    </div>
+
+    <div id="progress-card" class="card hidden">
+      <div class="card-header">
+        <h2>Progress</h2>
+        <button id="btn-cancel-import" class="btn-danger-sm">Cancel</button>
+      </div>
+      <div class="progress-bar-wrap">
+        <div id="progress-bar" class="progress-bar" style="width:0%"></div>
+      </div>
+      <p id="progress-label" class="progress-label">0 / 0 MB</p>
+      <div id="import-log" class="log"></div>
+      <p id="import-done" class="import-done hidden"></p>
+      <div id="eject-row" class="eject-row hidden">
+        <button id="btn-eject" class="btn-secondary">&#x23CF; Eject Camera</button>
+        <span id="safe-to-unplug" class="safe-unplug hidden">&#x2705; Safe to unplug</span>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- =============================================================== CATALOG -->
+  <section id="tab-catalog" class="tab-panel hidden">
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Archive Inventory</h2>
+        <button id="btn-build-catalog" class="btn-secondary">Build / Update Catalog</button>
+      </div>
+      <div id="catalog-build-progress" class="hidden">
+        <div class="build-status-row">
+          <span id="catalog-spinner" class="spinner"></span>
+          <span id="catalog-status-msg" class="muted">Starting…</span>
+          <button id="btn-cancel-catalog" class="btn-danger-sm">Cancel</button>
+        </div>
+        <div class="progress-bar-wrap">
+          <div id="catalog-bar" class="progress-bar" style="width:0%"></div>
+        </div>
+        <div id="catalog-build-log" class="log log-sm"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="catalog-controls">
+        <div id="catalog-stats" class="stats-bar"></div>
+        <div class="filter-row">
+          <label>Year:
+            <select id="filter-year">
+              <option value="">All</option>
+            </select>
+          </label>
+          <label>Source:
+            <select id="filter-source">
+              <option value="">All</option>
+              <option value="canon_import">This tool</option>
+              <option value="legacy_tvd">Legacy (VideoBrowser)</option>
+              <option value="manual">Manual</option>
+            </select>
+          </label>
+          <label>Glacier:
+            <select id="filter-glacier">
+              <option value="">All</option>
+              <option value="true">Archived</option>
+              <option value="false">Not archived</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div id="catalog-empty" class="muted">No catalog yet. Click "Build / Update Catalog" to scan your archive.</div>
+      <table id="catalog-table" class="recordings-table hidden">
+        <thead>
+          <tr>
+            <th>Recorded</th>
+            <th>Duration</th>
+            <th>Size</th>
+            <th>Path</th>
+            <th>Source</th>
+            <th>Glacier</th>
+          </tr>
+        </thead>
+        <tbody id="catalog-tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="card" id="duplicates-card">
+      <div class="card-header">
+        <h2>Duplicate Detection</h2>
+        <button id="btn-find-dupes" class="btn-secondary">Find Duplicates</button>
+      </div>
+      <div id="dupes-empty" class="muted">Click "Find Duplicates" to scan the catalog for matching recordings.</div>
+      <div id="dupes-none" class="hidden" style="color:var(--success);font-size:13px;">No duplicates found.</div>
+      <div id="dupes-list" class="hidden"></div>
+    </div>
+
+  </section>
+
+  <!-- =============================================================== SETTINGS -->
+  <section id="tab-settings" class="tab-panel hidden">
+    <div class="card">
+      <h2>Settings</h2>
+      <form id="settings-form">
+        <div class="field">
+          <label for="s-archive">Archive path</label>
+          <div class="input-row">
+            <input id="s-archive" name="archive_path" type="text" placeholder="/mnt/8tb/Camcorder Videos">
+            <button type="button" class="btn-secondary btn-browse" data-target="s-archive">Browse…</button>
+          </div>
+          <p class="field-hint">Root folder where YYYY/ year directories are created.</p>
+        </div>
+        <div class="field">
+          <label for="s-manifest">Manifest path <span class="opt">(optional)</span></label>
+          <div class="input-row">
+            <input id="s-manifest" name="manifest_path" type="text" placeholder="<archive>/manifest.json">
+            <button type="button" class="btn-secondary btn-browse" data-target="s-manifest">Browse…</button>
+          </div>
+          <p class="field-hint">Leave blank to use manifest.json inside the archive folder.</p>
+        </div>
+        <div class="field">
+          <label for="s-catalog">Catalog path <span class="opt">(optional)</span></label>
+          <div class="input-row">
+            <input id="s-catalog" name="catalog_path" type="text" placeholder="<archive>/catalog.json">
+            <button type="button" class="btn-secondary btn-browse" data-target="s-catalog">Browse…</button>
+          </div>
+          <p class="field-hint">Leave blank to use catalog.json inside the archive folder.</p>
+        </div>
+        <div class="field">
+          <label for="s-camera-base">Camera mount base path</label>
+          <div class="input-row">
+            <input id="s-camera-base" name="camera_base_path" type="text" placeholder="/media/user">
+            <button type="button" class="btn-secondary btn-browse" data-target="s-camera-base">Browse…</button>
+          </div>
+          <p class="field-hint">Directory scanned for connected camera volumes.</p>
+        </div>
+        <div class="field-row">
+          <button type="submit" class="btn-primary">Save Settings</button>
+          <span id="settings-saved" class="save-confirm hidden">Saved.</span>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <!-- ============================================================= PATH BROWSER MODAL -->
+  <div id="browser-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Select Folder</h3>
+        <button id="browser-close" class="btn-icon" aria-label="Close">&times;</button>
+      </div>
+      <div id="browser-breadcrumb" class="browser-breadcrumb"></div>
+      <div id="browser-list" class="browser-list"></div>
+      <div class="modal-footer">
+        <span id="browser-selected-path" class="browser-selected-path"></span>
+        <div class="modal-actions">
+          <button id="browser-cancel" class="btn-secondary">Cancel</button>
+          <button id="browser-select" class="btn-primary">Select This Folder</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

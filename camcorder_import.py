@@ -1,0 +1,542 @@
+#!/usr/bin/env python3
+"""
+Canon HFM52 AVCHD import utility.
+Imports only new MTS files from a mounted camera, losslessly concatenates
+multi-part recordings, and archives with timestamp-based naming.
+
+Usage (CLI):
+    python3 camcorder_import.py [--dry-run] [--archive DIR] [--manifest FILE] <mount_point>
+
+Can also be imported as a module by app.py.
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+
+ARCHIVE_DEFAULT = "/mnt/8tb/Camcorder Videos"
+PART_SIZE_THRESHOLD = 4_200_000_000  # ~4GB FAT32 limit with headroom
+
+
+# ---------------------------------------------------------------------------
+# Camera detection
+# ---------------------------------------------------------------------------
+
+def find_stream_dir(mount: Path) -> Path | None:
+    candidates = [
+        mount / "BDMV" / "STREAM",
+        mount / "AVCHD" / "BDMV" / "STREAM",
+        mount / "PRIVATE" / "AVCHD" / "BDMV" / "STREAM",
+    ]
+    for c in candidates:
+        if c.is_dir():
+            return c
+    for match in mount.rglob("STREAM"):
+        if match.is_dir() and match.parent.name.upper() == "BDMV":
+            return match
+    return None
+
+
+def get_mts_files(stream_dir: Path) -> list[Path]:
+    return sorted(
+        f for f in stream_dir.iterdir()
+        if f.suffix.upper() == ".MTS" and f.is_file()
+    )
+
+
+def detect_cameras(base_path: str = None) -> list[dict]:
+    """Scan base_path for mounted AVCHD camera volumes."""
+    if base_path is None:
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
+        base_path = f"/media/{user}"
+    base = Path(base_path)
+    if not base.exists():
+        return []
+    cameras = []
+    for mount in sorted(base.iterdir()):
+        if not mount.is_dir():
+            continue
+        stream_dir = find_stream_dir(mount)
+        if stream_dir is None:
+            continue
+        rel = str(stream_dir.relative_to(mount)).upper()
+        if rel.startswith("PRIVATE"):
+            volume_type = "SD Card"
+        elif rel.startswith("AVCHD"):
+            volume_type = "Internal Memory"
+        else:
+            volume_type = "Unknown"
+        files = get_mts_files(stream_dir)
+        cameras.append({
+            "label": mount.name,
+            "mount": str(mount),
+            "volume_type": volume_type,
+            "file_count": len(files),
+        })
+    return cameras
+
+
+# ---------------------------------------------------------------------------
+# Manifest (import dedup log)
+# ---------------------------------------------------------------------------
+
+def manifest_key(f: Path) -> str:
+    return f"{f.name}|{f.stat().st_size}"
+
+
+def load_manifest(manifest_path: Path) -> dict:
+    if manifest_path.exists():
+        with open(manifest_path) as fh:
+            return json.load(fh)
+    return {"imported": {}}
+
+
+def save_manifest(manifest_path: Path, manifest: dict) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(manifest_path, "w") as fh:
+        json.dump(manifest, fh, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Catalog (archive inventory)
+# ---------------------------------------------------------------------------
+
+def load_catalog(catalog_path: Path) -> dict:
+    if catalog_path.exists():
+        with open(catalog_path) as fh:
+            return json.load(fh)
+    return {"version": 1, "updated": None, "recordings": []}
+
+
+def save_catalog(catalog_path: Path, catalog: dict) -> None:
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(catalog_path, "w") as fh:
+        json.dump(catalog, fh, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# ffprobe helpers
+# ---------------------------------------------------------------------------
+
+def ffprobe_creation_time(path: Path) -> datetime | None:
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_entries", "format_tags=creation_time", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        data = json.loads(result.stdout)
+        ts = data.get("format", {}).get("tags", {}).get("creation_time", "")
+        if ts:
+            return datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        pass
+    return None
+
+
+def ffprobe_duration(path: Path) -> float | None:
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_entries", "format=duration", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        data = json.loads(result.stdout)
+        dur = data.get("format", {}).get("duration")
+        if dur:
+            return float(dur)
+    except Exception:
+        pass
+    return None
+
+
+def get_timestamp(path: Path) -> datetime:
+    ts = ffprobe_creation_time(path)
+    if ts:
+        return ts
+    return datetime.fromtimestamp(path.stat().st_mtime)
+
+
+# ---------------------------------------------------------------------------
+# Recording grouping
+# ---------------------------------------------------------------------------
+
+def group_into_recordings(files: list[Path]) -> list[list[Path]]:
+    """Group consecutive MTS files that belong to the same recording."""
+    if not files:
+        return []
+    groups: list[list[Path]] = []
+    current_group = [files[0]]
+    for i in range(1, len(files)):
+        prev, curr = files[i - 1], files[i]
+        is_continuation = False
+        prev_start = ffprobe_creation_time(prev)
+        prev_dur = ffprobe_duration(prev)
+        curr_start = ffprobe_creation_time(curr)
+        if prev_start and prev_dur and curr_start:
+            gap = curr_start.timestamp() - (prev_start.timestamp() + prev_dur)
+            if abs(gap) <= 2.0:
+                is_continuation = True
+        if not is_continuation and prev.stat().st_size >= PART_SIZE_THRESHOLD:
+            is_continuation = True
+        if is_continuation:
+            current_group.append(curr)
+        else:
+            groups.append(current_group)
+            current_group = [curr]
+    groups.append(current_group)
+    return groups
+
+
+# ---------------------------------------------------------------------------
+# File operations
+# ---------------------------------------------------------------------------
+
+def output_path(archive: Path, ts: datetime, parts: list[Path]) -> Path:
+    return archive / str(ts.year) / (ts.strftime("%Y%m%d_%H%M%S") + ".mts")
+
+
+def resolve_conflict(dest: Path) -> Path:
+    if not dest.exists():
+        return dest
+    stem, parent = dest.stem, dest.parent
+    i = 2
+    while True:
+        candidate = parent / f"{stem}_{i}.mts"
+        if not candidate.exists():
+            return candidate
+        i += 1
+
+
+def concat_or_copy(parts: list[Path], dest: Path, dry_run: bool) -> bool:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if len(parts) == 1:
+        if dry_run:
+            return True
+        shutil.copy2(parts[0], dest)
+        return True
+    list_file = dest.parent / f".concat_{dest.stem}.txt"
+    try:
+        with open(list_file, "w") as fh:
+            for p in parts:
+                fh.write(f"file '{p}'\n")
+        if dry_run:
+            list_file.unlink(missing_ok=True)
+            return True
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+             "-i", str(list_file), "-c", "copy", str(dest)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return False
+        return True
+    except Exception:
+        return False
+    finally:
+        list_file.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Scan (preview without copying)
+# ---------------------------------------------------------------------------
+
+def scan_new_recordings(mounts: list[Path], manifest_path: Path) -> list[dict]:
+    """
+    Scan camera volumes and return structured recording list.
+    Each entry includes already_imported flag for UI preview.
+    """
+    manifest = load_manifest(manifest_path)
+    already_imported = set(manifest["imported"].keys())
+    recordings = []
+    for mount in mounts:
+        stream_dir = find_stream_dir(mount)
+        if stream_dir is None:
+            continue
+        files = get_mts_files(stream_dir)
+        groups = group_into_recordings(files)
+        for group in groups:
+            ts = get_timestamp(group[0])
+            duration = sum(ffprobe_duration(f) or 0.0 for f in group)
+            size_bytes = sum(f.stat().st_size for f in group)
+            already = all(manifest_key(f) in already_imported for f in group)
+            recordings.append({
+                "mount": str(mount),
+                "files": [f.name for f in group],
+                "file_paths": [str(f) for f in group],
+                "recorded_at": ts.isoformat(),
+                "duration_seconds": round(duration),
+                "size_bytes": size_bytes,
+                "already_imported": already,
+                "is_multipart": len(group) > 1,
+            })
+    return recordings
+
+
+# ---------------------------------------------------------------------------
+# Import (generator — yields progress events)
+# ---------------------------------------------------------------------------
+
+def run_import(mounts: list[Path], archive: Path, manifest_path: Path,
+               catalog_path: Path = None, dry_run: bool = False):
+    """
+    Generator that scans mounts and imports new recordings.
+    Yields dicts with 'type' key describing progress.
+    """
+    yield {"type": "info", "msg": "Scanning camera..."}
+    recordings = scan_new_recordings(mounts, manifest_path)
+    new = [r for r in recordings if not r["already_imported"]]
+    total_bytes = sum(r["size_bytes"] for r in new)
+
+    yield {
+        "type": "import_start",
+        "total_files": len(recordings),
+        "total_new": len(new),
+        "total_bytes": total_bytes,
+        "dry_run": dry_run,
+    }
+
+    if not new:
+        yield {"type": "import_complete", "imported": 0, "errors": 0, "dry_run": dry_run}
+        return
+
+    manifest = load_manifest(manifest_path)
+    imported_count = 0
+    errors = 0
+    catalog_entries = []
+
+    for i, rec in enumerate(new):
+        parts = [Path(p) for p in rec["file_paths"]]
+        mount = Path(rec["mount"])
+        ts = datetime.fromisoformat(rec["recorded_at"])
+        dest = resolve_conflict(output_path(archive, ts, parts))
+        names = " + ".join(rec["files"]) if rec["is_multipart"] else rec["files"][0]
+
+        yield {
+            "type": "file_start",
+            "index": i,
+            "total": len(new),
+            "files": rec["files"],
+            "dest": str(dest.relative_to(archive)),
+            "size_bytes": rec["size_bytes"],
+            "is_multipart": rec["is_multipart"],
+        }
+
+        ok = concat_or_copy(parts, dest, dry_run)
+
+        if ok:
+            if not dry_run:
+                for part in parts:
+                    manifest["imported"][manifest_key(part)] = {
+                        "camera_file": str(part.relative_to(mount)),
+                        "size": part.stat().st_size,
+                        "import_date": datetime.now().strftime("%Y-%m-%d"),
+                        "output": str(dest.relative_to(archive)),
+                        "parts": [p.name for p in parts],
+                    }
+                catalog_entries.append({
+                    "path": str(dest.relative_to(archive)),
+                    "recorded_at": ts.isoformat(),
+                    "duration_seconds": rec.get("duration_seconds"),
+                    "size_bytes": rec["size_bytes"],
+                    "imported_at": datetime.now().strftime("%Y-%m-%d"),
+                    "source": "canon_import",
+                    "glacier_archived": False,
+                    "glacier_archive_id": None,
+                })
+            imported_count += 1
+            yield {"type": "file_done", "index": i, "dest": str(dest.relative_to(archive))}
+        else:
+            errors += 1
+            yield {"type": "file_error", "index": i, "files": rec["files"], "error": "copy failed"}
+
+    if not dry_run and imported_count > 0:
+        save_manifest(manifest_path, manifest)
+        if catalog_path:
+            catalog = load_catalog(catalog_path)
+            known = {r["path"] for r in catalog["recordings"]}
+            for entry in catalog_entries:
+                if entry["path"] not in known:
+                    catalog["recordings"].append(entry)
+            catalog["updated"] = datetime.now().isoformat()
+            save_catalog(catalog_path, catalog)
+
+    yield {"type": "import_complete", "imported": imported_count, "errors": errors, "dry_run": dry_run}
+
+
+# ---------------------------------------------------------------------------
+# Catalog builder (generator — yields progress events)
+# ---------------------------------------------------------------------------
+
+def build_catalog_from_archive(archive: Path, catalog_path: Path, cancel_event=None):
+    """
+    Walk archive directory, run ffprobe on each MTS file not already in catalog,
+    and upsert into catalog.json.  Pass a threading.Event as cancel_event to
+    support mid-build cancellation.
+    """
+    catalog = load_catalog(catalog_path)
+    known_paths = {r["path"] for r in catalog["recordings"]}
+
+    all_mts = sorted(
+        f for f in archive.rglob("*")
+        if f.suffix.upper() == ".MTS" and f.is_file()
+        and not any(p.name.startswith(".") for p in f.parents)
+    )
+    new_files = [f for f in all_mts if str(f.relative_to(archive)) not in known_paths]
+
+    yield {
+        "type": "catalog_start",
+        "new_files": len(new_files),
+        "known_files": len(known_paths),
+    }
+
+    added = 0
+    for i, f in enumerate(new_files):
+        if cancel_event and cancel_event.is_set():
+            yield {"type": "cancelled", "added": added, "total_so_far": len(catalog["recordings"])}
+            return
+        rel = str(f.relative_to(archive))
+        yield {"type": "catalog_file", "current": i + 1, "total": len(new_files), "path": rel}
+
+        rel_upper = rel.upper()
+        if "TVD_AVCHD" in rel_upper:
+            source = "legacy_tvd"
+        elif re.match(r"^\d{4}/\d{8}_\d{6}", rel):
+            source = "canon_import"
+        else:
+            source = "manual"
+
+        recorded_at = ffprobe_creation_time(f)
+        duration = ffprobe_duration(f)
+
+        if not recorded_at:
+            m = re.search(r"(\d{8})_(\d{6})", f.stem)
+            if m:
+                try:
+                    recorded_at = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+                except ValueError:
+                    pass
+        if not recorded_at:
+            for parent in f.parents:
+                if parent == archive:
+                    break
+                m = re.match(r"^(\d{8})$", parent.name)
+                if m:
+                    try:
+                        recorded_at = datetime.strptime(m.group(1), "%Y%m%d")
+                    except ValueError:
+                        pass
+                    break
+
+        catalog["recordings"].append({
+            "path": rel,
+            "recorded_at": recorded_at.isoformat() if recorded_at else None,
+            "duration_seconds": round(duration) if duration else None,
+            "size_bytes": f.stat().st_size,
+            "imported_at": None,
+            "source": source,
+            "glacier_archived": False,
+            "glacier_archive_id": None,
+        })
+        added += 1
+
+    catalog["updated"] = datetime.now().isoformat()
+    save_catalog(catalog_path, catalog)
+
+    yield {
+        "type": "catalog_complete",
+        "added": added,
+        "total_recordings": len(catalog["recordings"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="Canon HFM52 AVCHD import utility")
+    parser.add_argument("mount", nargs="?", help="Camera mount point")
+    parser.add_argument("--archive", default=ARCHIVE_DEFAULT)
+    parser.add_argument("--manifest", default=None)
+    parser.add_argument("--catalog", default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--detect", action="store_true", help="Detect connected cameras and exit")
+    parser.add_argument("--build-catalog", action="store_true", help="Build/update catalog from archive")
+    args = parser.parse_args()
+
+    archive = Path(args.archive)
+    manifest_path = Path(args.manifest) if args.manifest else archive / "manifest.json"
+    catalog_path = Path(args.catalog) if args.catalog else archive / "catalog.json"
+
+    if args.detect:
+        cameras = detect_cameras()
+        if not cameras:
+            print("No AVCHD camera volumes detected.")
+        for c in cameras:
+            print(f"  {c['label']} ({c['volume_type']}) — {c['file_count']} files at {c['mount']}")
+        return
+
+    if args.build_catalog:
+        print(f"Building catalog from {archive} ...")
+        for event in build_catalog_from_archive(archive, catalog_path):
+            if event["type"] == "catalog_start":
+                print(f"  {event['known_files']} already known, {event['new_files']} new to scan")
+            elif event["type"] == "catalog_file":
+                print(f"  [{event['current']}/{event['total']}] {event['path']}")
+            elif event["type"] == "catalog_complete":
+                print(f"\nDone. Added {event['added']} entries. Total: {event['total_recordings']} recordings.")
+        return
+
+    if not args.mount:
+        parser.error("mount point required (or use --detect / --build-catalog)")
+
+    mount = Path(args.mount)
+    if not mount.exists():
+        print(f"ERROR: Mount point does not exist: {mount}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Archive:  {archive}")
+    print(f"Manifest: {manifest_path}")
+    if args.dry_run:
+        print("Mode:     DRY RUN — no files will be written")
+    print()
+
+    imported = 0
+    errors = 0
+    for event in run_import([mount], archive, manifest_path, catalog_path, args.dry_run):
+        t = event["type"]
+        if t == "info":
+            print(event["msg"])
+        elif t == "import_start":
+            n = event["total_new"]
+            total_mb = event["total_bytes"] / 1024 ** 2
+            print(f"Found {event['total_files']} recordings, {n} new ({total_mb:.0f} MB).\n")
+        elif t == "file_start":
+            names = " + ".join(event["files"])
+            mb = event["size_bytes"] / 1024 ** 2
+            print(f"  [{event['index']+1}/{event['total']}] {names} → {event['dest']} ({mb:.0f} MB)")
+        elif t == "file_done":
+            action = "concat" if event.get("is_multipart") else "copy"
+            print(f"    [{action}] done")
+        elif t == "file_error":
+            print(f"    ERROR: {event['error']}", file=sys.stderr)
+            errors += 1
+        elif t == "import_complete":
+            imported = event["imported"]
+            errors = event["errors"]
+
+    print(f"\nDone. {imported} recording(s) imported, {errors} error(s).")
+    if args.dry_run:
+        print("(Dry run — nothing written.)")
+
+
+if __name__ == "__main__":
+    main()
