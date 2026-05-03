@@ -90,12 +90,19 @@ async function detect_cameras() {
 }
 
 function render_camera_list() {
-  const el = document.getElementById('camera-list');
+  const el         = document.getElementById('camera-list');
+  const eject_btn  = document.getElementById('btn-eject');
+  const safe_msg   = document.getElementById('safe-to-unplug');
+
+  safe_msg.classList.add('hidden');
+
   if (!detected_cameras.length) {
     el.innerHTML = '<p class="muted">No AVCHD camera volumes found. Is the camera plugged in and mounted?</p>';
     document.getElementById('btn-scan').disabled = true;
+    eject_btn.classList.add('hidden');
     return;
   }
+
   el.innerHTML = '';
   detected_cameras.forEach(c => {
     const item = document.createElement('label');
@@ -110,6 +117,10 @@ function render_camera_list() {
     });
     el.appendChild(item);
   });
+
+  eject_btn.classList.remove('hidden');
+  eject_btn.disabled = false;
+  eject_btn.textContent = '⏏ Eject Camera';
   update_scan_btn();
 }
 
@@ -162,9 +173,11 @@ function render_scan_results() {
   tbody.innerHTML = '';
   scan_recordings.forEach(r => {
     const tr = document.createElement('tr');
-    const status = r.already_imported
-      ? '<span class="badge badge-done">Imported</span>'
-      : '<span class="badge badge-new">New</span>';
+    const status = r.needs_stitch
+      ? '<span class="badge badge-stitch">Needs stitch</span>'
+      : r.already_imported
+        ? '<span class="badge badge-done">Imported</span>'
+        : '<span class="badge badge-new">New</span>';
     const multi = r.is_multipart
       ? ' <span class="badge badge-multi">Multi-part</span>' : '';
     tr.innerHTML = `
@@ -176,15 +189,18 @@ function render_scan_results() {
     tbody.appendChild(tr);
   });
 
-  const new_recs  = scan_recordings.filter(r => !r.already_imported);
-  const new_bytes = new_recs.reduce((s, r) => s + r.size_bytes, 0);
-  const all_bytes = scan_recordings.reduce((s, r) => s + r.size_bytes, 0);
+  const new_recs    = scan_recordings.filter(r => !r.already_imported);
+  const stitch_recs = scan_recordings.filter(r => r.needs_stitch);
+  const new_bytes   = new_recs.reduce((s, r) => s + r.size_bytes, 0);
 
   document.getElementById('scan-status').textContent = '';
+  const stitch_note = stitch_recs.length > 0
+    ? ` · ${stitch_recs.length} need stitch` : '';
   document.getElementById('scan-summary').textContent =
     `${scan_recordings.length} recordings found · ` +
-    `${new_recs.length} new (${fmt_bytes(new_bytes)}) · ` +
-    `${scan_recordings.length - new_recs.length} already imported`;
+    `${new_recs.length} to import (${fmt_bytes(new_bytes)})` +
+    stitch_note +
+    ` · ${scan_recordings.length - new_recs.length - stitch_recs.length} already imported`;
 
   document.getElementById('scan-results').classList.remove('hidden');
 
@@ -200,6 +216,7 @@ function render_scan_results() {
 async function start_import() {
   const mounts = selected_mounts();
   document.getElementById('btn-import').disabled = true;
+  document.getElementById('btn-eject').disabled = true;
   document.getElementById('progress-card').classList.remove('hidden');
   document.getElementById('import-done').classList.add('hidden');
   document.getElementById('import-log').innerHTML = '';
@@ -216,6 +233,7 @@ async function start_import() {
   if (!res.ok) {
     alert('Failed to start import: ' + (await res.text()));
     document.getElementById('btn-import').disabled = false;
+    document.getElementById('btn-eject').disabled = false;
     return;
   }
 
@@ -225,15 +243,17 @@ async function start_import() {
   src.onmessage = e => {
     const ev = JSON.parse(e.data);
     handle_import_event(ev, log);
-    if (ev.type === 'import_complete' || ev.type === 'error') {
+    if (ev.type === 'import_complete' || ev.type === 'error' || ev.type === 'cancelled') {
       src.close();
       document.getElementById('btn-import').disabled = false;
+      document.getElementById('btn-eject').disabled = false;
     }
   };
   src.onerror = () => {
     log_line(log, 'Stream disconnected.', 'log-err');
     src.close();
     document.getElementById('btn-import').disabled = false;
+    document.getElementById('btn-eject').disabled = false;
   };
 }
 
@@ -269,9 +289,7 @@ function handle_import_event(ev, log) {
       done.textContent = `Finished with errors: ${ev.imported} imported, ${ev.errors} failed.`;
     } else {
       done.classList.add('success');
-      done.textContent = `${ev.imported} recording(s) imported successfully. Eject the camera before unplugging.`;
-      document.getElementById('eject-row').classList.remove('hidden');
-      document.getElementById('safe-to-unplug').classList.add('hidden');
+      done.textContent = `${ev.imported} recording(s) imported successfully. Use the Eject button above before unplugging.`;
     }
     scan_camera();
   } else if (ev.type === 'error') {
@@ -537,6 +555,151 @@ async function find_duplicates() {
 }
 
 // ---------------------------------------------------------------------------
+// Stitch candidates
+// ---------------------------------------------------------------------------
+
+let stitch_groups = [];
+
+async function find_stitch_candidates() {
+  const btn = document.getElementById('btn-find-stitch');
+  btn.disabled = true;
+  btn.textContent = 'Scanning…';
+
+  document.getElementById('stitch-empty').classList.add('hidden');
+  document.getElementById('stitch-none').classList.add('hidden');
+  document.getElementById('stitch-list').classList.add('hidden');
+  document.getElementById('stitch-build-progress').classList.add('hidden');
+
+  try {
+    const res = await fetch('/api/catalog/stitch-candidates');
+    const data = await res.json();
+    stitch_groups = data.groups || [];
+
+    if (stitch_groups.length === 0) {
+      document.getElementById('stitch-none').classList.remove('hidden');
+      return;
+    }
+
+    const container = document.getElementById('stitch-list');
+    const total_size = stitch_groups.reduce((s, g) =>
+      s + g.reduce((gs, r) => gs + (r.size_bytes || 0), 0), 0);
+
+    container.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+        <p style="font-size:13px;color:var(--muted)">
+          ${stitch_groups.length} group(s) found · ${fmt_bytes(total_size)} total · parts will be merged and originals deleted
+        </p>
+        <button id="btn-stitch-all" class="btn-primary">Stitch All</button>
+      </div>`;
+
+    stitch_groups.forEach((g, gi) => {
+      const group = document.createElement('div');
+      group.className = 'dupe-group';
+      const total_dur = g.reduce((s, r) => s + (r.duration_seconds || 0), 0);
+      const total_sz  = g.reduce((s, r) => s + (r.size_bytes || 0), 0);
+      group.innerHTML = `<div class="dupe-header">
+        ${fmt_date(g[0].recorded_at)} &nbsp;·&nbsp; ${fmt_duration(total_dur)} merged &nbsp;·&nbsp; ${fmt_bytes(total_sz)} &nbsp;·&nbsp; ${g.length} parts
+      </div>`;
+      g.forEach((r, ri) => {
+        const row = document.createElement('div');
+        row.className = `dupe-row ${ri === g.length - 1 ? 'keep' : 'dupe'}`;
+        row.innerHTML = `
+          <span class="dupe-verdict">Part ${ri + 1}</span>
+          <span class="dupe-path">${r.path}</span>
+          <span class="dupe-meta">${fmt_bytes(r.size_bytes)} · ${fmt_duration(r.duration_seconds)}</span>`;
+        group.appendChild(row);
+      });
+      container.appendChild(group);
+    });
+
+    container.classList.remove('hidden');
+    document.getElementById('btn-stitch-all').addEventListener('click', start_stitch_all);
+  } catch (e) {
+    document.getElementById('stitch-empty').textContent = 'Error: ' + e.message;
+    document.getElementById('stitch-empty').classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Find Candidates';
+  }
+}
+
+async function start_stitch_all() {
+  document.getElementById('btn-stitch-all').disabled = true;
+  document.getElementById('btn-find-stitch').disabled = true;
+
+  const progress = document.getElementById('stitch-build-progress');
+  const spinner  = document.getElementById('stitch-spinner');
+  const status   = document.getElementById('stitch-status-msg');
+  const log      = document.getElementById('stitch-log');
+  const cancel   = document.getElementById('btn-cancel-stitch');
+
+  progress.classList.remove('hidden');
+  log.innerHTML = '';
+  spinner.classList.remove('hidden');
+  status.textContent = 'Starting…';
+  cancel.disabled = false;
+
+  const res = await fetch('/api/catalog/stitch/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({groups: stitch_groups}),
+  });
+  if (!res.ok) {
+    log_line(log, 'Failed to start: ' + (await res.text()), 'log-err');
+    spinner.classList.add('hidden');
+    document.getElementById('btn-find-stitch').disabled = false;
+    return;
+  }
+
+  const finish = () => {
+    spinner.classList.add('hidden');
+    cancel.disabled = true;
+    document.getElementById('btn-find-stitch').disabled = false;
+  };
+
+  const src = new EventSource('/api/catalog/stitch/stream');
+  src.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'stitch_start') {
+      status.textContent = `Stitching ${ev.total_groups} group(s)…`;
+    } else if (ev.type === 'stitch_file_start') {
+      log_line(log, `[${ev.index+1}/${ev.total}] ${ev.parts.join(' + ')} → ${ev.dest}`, 'log-start');
+      status.textContent = `[${ev.index+1}/${ev.total}] ${ev.dest.split('/').pop()}`;
+    } else if (ev.type === 'stitch_file_done') {
+      log_line(log, `  ✓ merged · removed: ${ev.deleted.join(', ')}`, 'log-ok');
+    } else if (ev.type === 'stitch_error') {
+      log_line(log, `  ✗ ${ev.error}`, 'log-err');
+    } else if (ev.type === 'stitch_warning') {
+      log_line(log, `  ⚠ ${ev.msg}`, 'log-info');
+    } else if (ev.type === 'info') {
+      log_line(log, ev.msg);
+    } else if (ev.type === 'stitch_complete') {
+      log_line(log, `Done. ${ev.stitched} group(s) stitched, ${ev.errors} error(s).`,
+        ev.errors > 0 ? 'log-err' : 'log-ok');
+      status.textContent = `Complete — ${ev.stitched} merged.`;
+      src.close();
+      finish();
+      stitch_groups = [];
+      document.getElementById('stitch-list').classList.add('hidden');
+      document.getElementById('stitch-none').classList.remove('hidden');
+      document.getElementById('stitch-none').textContent = `Done — ${ev.stitched} recording(s) stitched.`;
+      document.getElementById('stitch-none').style.color = 'var(--success)';
+      load_catalog();
+    } else if (ev.type === 'cancelled') {
+      log_line(log, `Cancelled after ${ev.stitched} group(s).`, 'log-err');
+      status.textContent = 'Cancelled.';
+      src.close();
+      finish();
+    } else if (ev.type === 'error') {
+      log_line(log, 'Error: ' + ev.msg, 'log-err');
+      src.close();
+      finish();
+    }
+  };
+  src.onerror = () => { src.close(); finish(); };
+}
+
+// ---------------------------------------------------------------------------
 // Path browser modal
 // ---------------------------------------------------------------------------
 
@@ -655,6 +818,8 @@ document.getElementById('btn-eject').addEventListener('click', async () => {
 document.getElementById('btn-build-catalog').addEventListener('click', build_catalog);
 document.getElementById('btn-find-dupes').addEventListener('click', find_duplicates);
 document.getElementById('btn-cancel-catalog').addEventListener('click', cancel_job);
+document.getElementById('btn-find-stitch').addEventListener('click', find_stitch_candidates);
+document.getElementById('btn-cancel-stitch').addEventListener('click', cancel_job);
 document.getElementById('filter-year').addEventListener('change', apply_catalog_filters);
 document.getElementById('filter-source').addEventListener('change', apply_catalog_filters);
 document.getElementById('filter-glacier').addEventListener('change', apply_catalog_filters);
@@ -665,10 +830,63 @@ document.getElementById('btn-goto-settings').addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Status bar
+// ---------------------------------------------------------------------------
+
+async function load_status() {
+  const bar = document.getElementById('status-bar');
+  try {
+    const res = await fetch('/api/status');
+    const s = await res.json();
+
+    const fmt_date_short = iso => iso ? iso.replace('T', ' ').slice(0, 16) : null;
+
+    const items = [
+      {
+        label: 'Archive',
+        ok: s.archive.ok,
+        detail: s.archive.ok ? s.archive.path : `Not reachable: ${s.archive.path}`,
+        level: s.archive.ok ? 'ok' : 'error',
+      },
+      {
+        label: 'Manifest',
+        ok: s.manifest.exists,
+        detail: s.manifest.exists ? `${s.manifest.entries} entries` : 'Not found',
+        level: s.manifest.exists ? 'ok' : 'warn',
+      },
+      {
+        label: 'Catalog',
+        ok: s.catalog.exists,
+        detail: s.catalog.exists
+          ? `${s.catalog.recordings} recordings · last built ${fmt_date_short(s.catalog.updated) || 'unknown'}`
+          : 'Not built yet',
+        level: s.catalog.exists ? 'ok' : 'warn',
+      },
+    ];
+
+    const worst = items.some(i => i.level === 'error') ? 'error'
+                : items.some(i => i.level === 'warn')  ? 'warn' : 'ok';
+
+    bar.className = `status-bar ${worst}`;
+    bar.innerHTML = items.map(i => `
+      <div class="status-item">
+        <span class="status-dot ${i.level}"></span>
+        <span><strong>${i.label}:</strong> ${i.detail}</span>
+      </div>`).join('');
+    bar.classList.remove('hidden');
+  } catch (e) {
+    bar.className = 'status-bar error';
+    bar.innerHTML = `<div class="status-item"><span class="status-dot error"></span><span>Could not load status</span></div>`;
+    bar.classList.remove('hidden');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
 (async () => {
+  await load_status();
   await load_settings_form();
   await detect_cameras();
 })();

@@ -4,12 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Canon Import Tool</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎥</text></svg>">
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
   <header>
     <h1>&#x1F3A5; Canon Import Tool</h1>
   </header>
+
+  <div id="status-bar" class="status-bar hidden"></div>
 
   <nav class="tabs">
     <button class="tab-btn active" data-tab="import">Import</button>
@@ -23,11 +26,15 @@
     <div class="card">
       <div class="card-header">
         <h2>Camera Volumes</h2>
-        <button id="btn-detect" class="btn-secondary">Detect Camera</button>
+        <div class="header-actions">
+          <button id="btn-eject" class="btn-danger-sm hidden">&#x23CF; Eject Camera</button>
+          <button id="btn-detect" class="btn-secondary">Detect Camera</button>
+        </div>
       </div>
       <div id="camera-list" class="camera-list">
         <p class="muted">Click "Detect Camera" to scan for connected volumes.</p>
       </div>
+      <div id="safe-to-unplug" class="safe-unplug hidden">&#x2705; Safe to unplug</div>
     </div>
 
     <div id="archive-infobox" class="info-box">
@@ -81,10 +88,6 @@
       <p id="progress-label" class="progress-label">0 / 0 MB</p>
       <div id="import-log" class="log"></div>
       <p id="import-done" class="import-done hidden"></p>
-      <div id="eject-row" class="eject-row hidden">
-        <button id="btn-eject" class="btn-secondary">&#x23CF; Eject Camera</button>
-        <span id="safe-to-unplug" class="safe-unplug hidden">&#x2705; Safe to unplug</span>
-      </div>
     </div>
 
   </section>
@@ -153,6 +156,24 @@
         </thead>
         <tbody id="catalog-tbody"></tbody>
       </table>
+    </div>
+
+    <div class="card" id="stitch-card">
+      <div class="card-header">
+        <h2>Stitch Candidates</h2>
+        <button id="btn-find-stitch" class="btn-secondary">Find Candidates</button>
+      </div>
+      <div id="stitch-empty" class="muted">Click "Find Candidates" to detect recordings that were imported as individual parts and need merging.</div>
+      <div id="stitch-none" class="hidden" style="color:var(--success);font-size:13px;">No stitch candidates found.</div>
+      <div id="stitch-build-progress" class="hidden">
+        <div class="build-status-row">
+          <span id="stitch-spinner" class="spinner"></span>
+          <span id="stitch-status-msg" class="muted">Stitching…</span>
+          <button id="btn-cancel-stitch" class="btn-danger-sm">Cancel</button>
+        </div>
+        <div id="stitch-log" class="log log-sm"></div>
+      </div>
+      <div id="stitch-list" class="hidden"></div>
     </div>
 
     <div class="card" id="duplicates-card">

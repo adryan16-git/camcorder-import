@@ -22,7 +22,7 @@ from pathlib import Path
 
 
 ARCHIVE_DEFAULT = "/mnt/8tb/Camcorder Videos"
-PART_SIZE_THRESHOLD = 4_200_000_000  # ~4GB FAT32 limit with headroom
+PART_SIZE_THRESHOLD = 1_900_000_000  # camera splits recordings at ~2GB
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +168,21 @@ def get_timestamp(path: Path) -> datetime:
 # Recording grouping
 # ---------------------------------------------------------------------------
 
+def _sequential_filenames(a: Path, b: Path) -> bool:
+    """True if b's numeric stem immediately follows a's (e.g. 00002 → 00003)."""
+    try:
+        return int(b.stem) == int(a.stem) + 1
+    except ValueError:
+        return False
+
+
 def group_into_recordings(files: list[Path]) -> list[list[Path]]:
-    """Group consecutive MTS files that belong to the same recording."""
+    """Group consecutive MTS files that belong to the same recording.
+
+    Primary: ffprobe timestamp gap ≤ 2 s (for cameras that embed creation_time).
+    Fallback: prev file is at the size limit AND filenames are sequential
+              (Canon HFM52 splits at ~2 GB with no timestamp metadata).
+    """
     if not files:
         return []
     groups: list[list[Path]] = []
@@ -177,6 +190,7 @@ def group_into_recordings(files: list[Path]) -> list[list[Path]]:
     for i in range(1, len(files)):
         prev, curr = files[i - 1], files[i]
         is_continuation = False
+
         prev_start = ffprobe_creation_time(prev)
         prev_dur = ffprobe_duration(prev)
         curr_start = ffprobe_creation_time(curr)
@@ -184,8 +198,11 @@ def group_into_recordings(files: list[Path]) -> list[list[Path]]:
             gap = curr_start.timestamp() - (prev_start.timestamp() + prev_dur)
             if abs(gap) <= 2.0:
                 is_continuation = True
-        if not is_continuation and prev.stat().st_size >= PART_SIZE_THRESHOLD:
-            is_continuation = True
+
+        if not is_continuation:
+            if prev.stat().st_size >= PART_SIZE_THRESHOLD and _sequential_filenames(prev, curr):
+                is_continuation = True
+
         if is_continuation:
             current_group.append(curr)
         else:
@@ -248,7 +265,8 @@ def concat_or_copy(parts: list[Path], dest: Path, dry_run: bool) -> bool:
 # Scan (preview without copying)
 # ---------------------------------------------------------------------------
 
-def scan_new_recordings(mounts: list[Path], manifest_path: Path) -> list[dict]:
+def scan_new_recordings(mounts: list[Path], manifest_path: Path,
+                        archive: Path = None) -> list[dict]:
     """
     Scan camera volumes and return structured recording list.
     Each entry includes already_imported flag for UI preview.
@@ -266,7 +284,18 @@ def scan_new_recordings(mounts: list[Path], manifest_path: Path) -> list[dict]:
             ts = get_timestamp(group[0])
             duration = sum(ffprobe_duration(f) or 0.0 for f in group)
             size_bytes = sum(f.stat().st_size for f in group)
-            already = all(manifest_key(f) in already_imported for f in group)
+            all_in_manifest = all(manifest_key(f) in already_imported for f in group)
+
+            # For multi-part groups, verify the merged output exists at the right size.
+            # Files imported individually before stitch logic existed will either be
+            # missing or be only one part's worth of bytes — both need re-stitching.
+            needs_stitch = False
+            if all_in_manifest and len(group) > 1 and archive is not None:
+                expected = output_path(archive, ts, group)
+                if not expected.exists() or expected.stat().st_size < size_bytes * 0.9:
+                    needs_stitch = True
+
+            already = all_in_manifest and not needs_stitch
             recordings.append({
                 "mount": str(mount),
                 "files": [f.name for f in group],
@@ -275,6 +304,7 @@ def scan_new_recordings(mounts: list[Path], manifest_path: Path) -> list[dict]:
                 "duration_seconds": round(duration),
                 "size_bytes": size_bytes,
                 "already_imported": already,
+                "needs_stitch": needs_stitch,
                 "is_multipart": len(group) > 1,
             })
     return recordings
@@ -291,8 +321,8 @@ def run_import(mounts: list[Path], archive: Path, manifest_path: Path,
     Yields dicts with 'type' key describing progress.
     """
     yield {"type": "info", "msg": "Scanning camera..."}
-    recordings = scan_new_recordings(mounts, manifest_path)
-    new = [r for r in recordings if not r["already_imported"]]
+    recordings = scan_new_recordings(mounts, manifest_path, archive)
+    new = [r for r in recordings if not r["already_imported"] or r.get("needs_stitch")]
     total_bytes = sum(r["size_bytes"] for r in new)
 
     yield {
@@ -316,7 +346,10 @@ def run_import(mounts: list[Path], archive: Path, manifest_path: Path,
         parts = [Path(p) for p in rec["file_paths"]]
         mount = Path(rec["mount"])
         ts = datetime.fromisoformat(rec["recorded_at"])
-        dest = resolve_conflict(output_path(archive, ts, parts))
+        intended = output_path(archive, ts, parts)
+        # For stitch jobs, overwrite the existing under-sized file rather than
+        # creating a _2 conflict — the old file is just one unmerged part.
+        dest = intended if rec.get("needs_stitch") else resolve_conflict(intended)
         names = " + ".join(rec["files"]) if rec["is_multipart"] else rec["files"][0]
 
         yield {
@@ -328,6 +361,15 @@ def run_import(mounts: list[Path], archive: Path, manifest_path: Path,
             "size_bytes": rec["size_bytes"],
             "is_multipart": rec["is_multipart"],
         }
+
+        # Collect old individual-part archive paths before overwriting manifest
+        old_outputs = set()
+        if rec.get("needs_stitch") and not dry_run:
+            for part in parts:
+                entry = manifest["imported"].get(manifest_key(part), {})
+                old_out = entry.get("output")
+                if old_out:
+                    old_outputs.add(archive / old_out)
 
         ok = concat_or_copy(parts, dest, dry_run)
 
@@ -345,12 +387,17 @@ def run_import(mounts: list[Path], archive: Path, manifest_path: Path,
                     "path": str(dest.relative_to(archive)),
                     "recorded_at": ts.isoformat(),
                     "duration_seconds": rec.get("duration_seconds"),
-                    "size_bytes": rec["size_bytes"],
+                    "size_bytes": dest.stat().st_size,
                     "imported_at": datetime.now().strftime("%Y-%m-%d"),
                     "source": "canon_import",
                     "glacier_archived": False,
                     "glacier_archive_id": None,
                 })
+                # Delete orphaned individual-part files left from old imports
+                for old_path in old_outputs:
+                    if old_path != dest and old_path.exists():
+                        old_path.unlink(missing_ok=True)
+                        yield {"type": "info", "msg": f"Removed old part: {old_path.relative_to(archive)}"}
             imported_count += 1
             yield {"type": "file_done", "index": i, "dest": str(dest.relative_to(archive))}
         else:
@@ -361,14 +408,164 @@ def run_import(mounts: list[Path], archive: Path, manifest_path: Path,
         save_manifest(manifest_path, manifest)
         if catalog_path:
             catalog = load_catalog(catalog_path)
-            known = {r["path"] for r in catalog["recordings"]}
+            # Remove any orphaned individual-part entries replaced by stitched files
+            stitched_paths = {e["path"] for e in catalog_entries}
+            catalog["recordings"] = [
+                r for r in catalog["recordings"]
+                if r["path"] not in stitched_paths
+            ]
             for entry in catalog_entries:
-                if entry["path"] not in known:
-                    catalog["recordings"].append(entry)
+                catalog["recordings"].append(entry)
             catalog["updated"] = datetime.now().isoformat()
             save_catalog(catalog_path, catalog)
 
     yield {"type": "import_complete", "imported": imported_count, "errors": errors, "dry_run": dry_run}
+
+
+# ---------------------------------------------------------------------------
+# Archive stitch candidates
+# ---------------------------------------------------------------------------
+
+def find_stitch_candidates(catalog: dict) -> list[list[dict]]:
+    """
+    Find groups of non-legacy archive recordings that appear to be individually-
+    imported parts of the same recording (never merged).
+    Criteria: prev size >= PART_SIZE_THRESHOLD and prev end timestamp ≈ curr start
+    (within 60 s tolerance).
+    """
+    recs = [
+        r for r in catalog.get("recordings", [])
+        if r.get("source") != "legacy_tvd"
+        and r.get("recorded_at")
+        and r.get("duration_seconds")
+        and r.get("size_bytes")
+    ]
+    recs = sorted(recs, key=lambda r: r["recorded_at"])
+
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+
+    for rec in recs:
+        if not current:
+            current = [rec]
+            continue
+        prev = current[-1]
+        try:
+            prev_end = (
+                datetime.fromisoformat(prev["recorded_at"]).timestamp()
+                + prev["duration_seconds"]
+            )
+            curr_start = datetime.fromisoformat(rec["recorded_at"]).timestamp()
+            gap = abs(curr_start - prev_end)
+        except (ValueError, TypeError):
+            gap = float("inf")
+
+        if prev.get("size_bytes", 0) >= PART_SIZE_THRESHOLD and gap <= 60.0:
+            current.append(rec)
+        else:
+            if len(current) > 1:
+                groups.append(current)
+            current = [rec]
+
+    if len(current) > 1:
+        groups.append(current)
+
+    return groups
+
+
+def stitch_archive_parts(groups: list[list[dict]], archive: Path,
+                         catalog_path: Path, manifest_path: Path = None,
+                         cancel_event=None):
+    """
+    Generator that stitches groups of archive part-files into single merged files,
+    deletes the individual parts, and updates the catalog (and manifest if given).
+    """
+    total = len(groups)
+    yield {"type": "stitch_start", "total_groups": total}
+
+    catalog = load_catalog(catalog_path)
+    manifest = load_manifest(manifest_path) if manifest_path and manifest_path.exists() else None
+
+    stitched = 0
+    errors = 0
+
+    for i, group in enumerate(groups):
+        if cancel_event and cancel_event.is_set():
+            yield {"type": "cancelled", "stitched": stitched}
+            return
+
+        part_paths = [archive / r["path"] for r in group]
+        missing = [str(p) for p in part_paths if not p.exists()]
+        if missing:
+            yield {"type": "stitch_error", "index": i, "error": f"Missing: {', '.join(missing)}"}
+            errors += 1
+            continue
+
+        dest = part_paths[0]  # merged file overwrites the first part
+        part_labels = [r["path"].split("/")[-1] for r in group]
+        yield {
+            "type": "stitch_file_start",
+            "index": i,
+            "total": total,
+            "parts": part_labels,
+            "dest": group[0]["path"],
+        }
+
+        ok = concat_or_copy(part_paths, dest, dry_run=False)
+        if not ok:
+            yield {"type": "stitch_error", "index": i, "error": "ffmpeg concat failed"}
+            errors += 1
+            continue
+
+        # Delete the extra part files (keep dest which is part_paths[0])
+        deleted = []
+        for p in part_paths[1:]:
+            try:
+                p.unlink()
+                deleted.append(str(p.relative_to(archive)))
+            except Exception as e:
+                yield {"type": "stitch_warning", "msg": f"Could not delete {p.name}: {e}"}
+
+        # Update catalog: remove all parts, add merged entry
+        merged_size = dest.stat().st_size
+        total_duration = sum(r.get("duration_seconds") or 0 for r in group)
+        merged_path = str(dest.relative_to(archive))
+        part_rel_paths = {r["path"] for r in group}
+        catalog["recordings"] = [
+            r for r in catalog["recordings"] if r["path"] not in part_rel_paths
+        ]
+        first = group[0]
+        catalog["recordings"].append({
+            "path": merged_path,
+            "recorded_at": first["recorded_at"],
+            "duration_seconds": round(total_duration),
+            "size_bytes": merged_size,
+            "imported_at": first.get("imported_at"),
+            "source": first.get("source", "canon_import"),
+            "glacier_archived": False,
+            "glacier_archive_id": None,
+        })
+
+        # Update manifest if provided: point all parts' camera-file entries to merged output
+        if manifest:
+            for key, entry in manifest["imported"].items():
+                if entry.get("output") in part_rel_paths:
+                    entry["output"] = merged_path
+
+        stitched += 1
+        yield {
+            "type": "stitch_file_done",
+            "index": i,
+            "dest": merged_path,
+            "deleted": deleted,
+        }
+
+    catalog["updated"] = datetime.now().isoformat()
+    save_catalog(catalog_path, catalog)
+    if manifest and manifest_path:
+        save_manifest(manifest_path, manifest)
+
+    yield {"type": "stitch_complete", "stitched": stitched, "errors": errors}
 
 
 # ---------------------------------------------------------------------------

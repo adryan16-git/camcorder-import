@@ -186,6 +186,7 @@ button { cursor: pointer; font-family: inherit; font-size: 14px; border-radius: 
 .badge-new    { background: #dcfce7; color: #15803d; }
 .badge-done   { background: #f1f5f9; color: var(--muted); }
 .badge-multi  { background: #fef9c3; color: #854d0e; }
+.badge-stitch { background: #fce7f3; color: #9d174d; }
 .badge-legacy { background: #f5f3ff; color: #6d28d9; }
 .badge-manual { background: #fef3c7; color: #92400e; }
 .badge-ok     { background: #dcfce7; color: #15803d; }
@@ -310,7 +311,9 @@ button { cursor: pointer; font-family: inherit; font-size: 14px; border-radius: 
   font-weight: 600;
   color: var(--success);
   font-size: 14px;
+  margin-top: 10px;
 }
+.header-actions { display: flex; align-items: center; gap: 8px; }
 
 /* ------------------------------------------------------------ duplicates */
 .dupe-group {
@@ -480,6 +483,26 @@ button { cursor: pointer; font-family: inherit; font-size: 14px; border-radius: 
 .input-row { display: flex; gap: 8px; align-items: stretch; }
 .input-row input[type=text] { flex: 1; }
 .btn-browse { white-space: nowrap; }
+
+/* -------------------------------------------------------------- status bar */
+.status-bar {
+  display: flex;
+  gap: 20px;
+  padding: 7px 24px;
+  font-size: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.status-bar.ok      { background: #f0fdf4; border-bottom: 1px solid #bbf7d0; }
+.status-bar.warn    { background: #fff7ed; border-bottom: 1px solid #fed7aa; }
+.status-bar.error   { background: #fef2f2; border-bottom: 1px solid #fecaca; }
+.status-item { display: flex; align-items: center; gap: 5px; }
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.status-dot.ok    { background: var(--success); }
+.status-dot.warn  { background: var(--warning); }
+.status-dot.error { background: var(--error); }
 
 /* ----------------------------------------------------------------- helpers */
 .muted   { color: var(--muted); }

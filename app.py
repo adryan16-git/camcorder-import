@@ -16,6 +16,7 @@ from flask import Flask, Response, jsonify, render_template, request, stream_wit
 import camcorder_import as ci
 
 app = Flask(__name__)
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
 SETTINGS_EXAMPLE_FILE = Path(__file__).parent / "settings.example.json"
@@ -150,9 +151,9 @@ def scan():
     if not mounts:
         return jsonify({"error": "No mounts specified"}), 400
     settings = load_settings()
-    _, manifest_path, _ = resolved_paths(settings)
+    archive, manifest_path, _ = resolved_paths(settings)
     try:
-        recordings = ci.scan_new_recordings(mounts, manifest_path)
+        recordings = ci.scan_new_recordings(mounts, manifest_path, archive)
         return jsonify(recordings)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -268,6 +269,38 @@ def eject():
     return jsonify({"ok": all_ok, "results": results})
 
 
+@app.route("/api/catalog/stitch-candidates")
+def catalog_stitch_candidates():
+    settings = load_settings()
+    archive, manifest_path, catalog_path = resolved_paths(settings)
+    catalog = ci.load_catalog(catalog_path)
+    groups = ci.find_stitch_candidates(catalog)
+    return jsonify({"count": len(groups), "groups": groups})
+
+
+@app.route("/api/catalog/stitch/start", methods=["POST"])
+def catalog_stitch_start():
+    data = request.json or {}
+    groups = data.get("groups")
+    if not groups:
+        return jsonify({"error": "No groups specified"}), 400
+    settings = load_settings()
+    archive, manifest_path, catalog_path = resolved_paths(settings)
+    if not _start_job("stitch", ci.stitch_archive_parts,
+                      groups, archive, catalog_path, manifest_path, _cancel_event):
+        return jsonify({"error": "A job is already running"}), 409
+    return jsonify({"status": "started"})
+
+
+@app.route("/api/catalog/stitch/stream")
+def catalog_stitch_stream():
+    return Response(
+        stream_with_context(_sse_stream("stitch")),
+        content_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.route("/api/cancel", methods=["POST"])
 def cancel():
     _cancel_event.set()
@@ -290,6 +323,54 @@ def catalog_build_stream():
         content_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Routes — health status
+# ---------------------------------------------------------------------------
+
+@app.route("/api/status")
+def status():
+    settings = load_settings()
+    archive, manifest_path, catalog_path = resolved_paths(settings)
+
+    archive_ok = archive.is_dir()
+
+    manifest_count = None
+    if manifest_path.exists():
+        try:
+            data = json.loads(manifest_path.read_text())
+            manifest_count = len(data)
+        except Exception:
+            manifest_count = 0
+
+    catalog_count = None
+    catalog_updated = None
+    if catalog_path.exists():
+        try:
+            data = json.loads(catalog_path.read_text())
+            catalog_count = len(data.get("recordings", []))
+            catalog_updated = data.get("updated")
+        except Exception:
+            catalog_count = 0
+
+    return jsonify({
+        "archive": {
+            "path": str(archive),
+            "ok": archive_ok,
+        },
+        "manifest": {
+            "path": str(manifest_path),
+            "exists": manifest_path.exists(),
+            "entries": manifest_count,
+        },
+        "catalog": {
+            "path": str(catalog_path),
+            "exists": catalog_path.exists(),
+            "recordings": catalog_count,
+            "updated": catalog_updated,
+        },
+    })
 
 
 # ---------------------------------------------------------------------------
