@@ -8,6 +8,7 @@ Then open: http://localhost:8080
 import json
 import os
 import queue
+import subprocess
 import threading
 from pathlib import Path
 
@@ -27,6 +28,7 @@ DEFAULT_SETTINGS = {
     "manifest_path": "",
     "catalog_path": "",
     "camera_base_path": f"/media/{_user}",
+    "stitch_exclude_dirs": ["Combine", "TVD_AVCHD"],
 }
 
 
@@ -240,7 +242,6 @@ def catalog_duplicates():
 
 @app.route("/api/eject", methods=["POST"])
 def eject():
-    import subprocess
     mounts = (request.json or {}).get("mounts", [])
     if not mounts:
         return jsonify({"error": "No mounts specified"}), 400
@@ -274,7 +275,8 @@ def catalog_stitch_candidates():
     settings = load_settings()
     archive, manifest_path, catalog_path = resolved_paths(settings)
     catalog = ci.load_catalog(catalog_path)
-    groups = ci.find_stitch_candidates(catalog)
+    exclude = settings.get("stitch_exclude_dirs", [])
+    groups = ci.find_stitch_candidates(catalog, exclude_dirs=exclude)
     return jsonify({"count": len(groups), "groups": groups})
 
 

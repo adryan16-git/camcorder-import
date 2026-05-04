@@ -470,10 +470,11 @@ async function build_catalog() {
 async function load_settings_form() {
   const res = await fetch('/api/settings');
   const s   = await res.json();
-  document.getElementById('s-archive').value      = s.archive_path    || '';
-  document.getElementById('s-manifest').value     = s.manifest_path   || '';
-  document.getElementById('s-catalog').value      = s.catalog_path    || '';
-  document.getElementById('s-camera-base').value  = s.camera_base_path || '';
+  document.getElementById('s-archive').value        = s.archive_path    || '';
+  document.getElementById('s-manifest').value       = s.manifest_path   || '';
+  document.getElementById('s-catalog').value        = s.catalog_path    || '';
+  document.getElementById('s-camera-base').value    = s.camera_base_path || '';
+  document.getElementById('s-stitch-exclude').value = (s.stitch_exclude_dirs || []).join('\n');
 
   document.getElementById('archive-display').textContent = s.archive_path || '(not set)';
 }
@@ -481,10 +482,12 @@ async function load_settings_form() {
 document.getElementById('settings-form').addEventListener('submit', async e => {
   e.preventDefault();
   const data = {
-    archive_path:     document.getElementById('s-archive').value.trim(),
-    manifest_path:    document.getElementById('s-manifest').value.trim(),
-    catalog_path:     document.getElementById('s-catalog').value.trim(),
-    camera_base_path: document.getElementById('s-camera-base').value.trim(),
+    archive_path:       document.getElementById('s-archive').value.trim(),
+    manifest_path:      document.getElementById('s-manifest').value.trim(),
+    catalog_path:       document.getElementById('s-catalog').value.trim(),
+    camera_base_path:   document.getElementById('s-camera-base').value.trim(),
+    stitch_exclude_dirs: document.getElementById('s-stitch-exclude').value
+      .split('\n').map(s => s.trim()).filter(Boolean),
   };
   await fetch('/api/settings', {
     method: 'POST',
@@ -599,8 +602,9 @@ async function find_stitch_candidates() {
       group.className = 'dupe-group';
       const total_dur = g.reduce((s, r) => s + (r.duration_seconds || 0), 0);
       const total_sz  = g.reduce((s, r) => s + (r.size_bytes || 0), 0);
-      group.innerHTML = `<div class="dupe-header">
-        ${fmt_date(g[0].recorded_at)} &nbsp;·&nbsp; ${fmt_duration(total_dur)} merged &nbsp;·&nbsp; ${fmt_bytes(total_sz)} &nbsp;·&nbsp; ${g.length} parts
+      group.innerHTML = `<div class="dupe-header stitch-group-header">
+        <span>${fmt_date(g[0].recorded_at)} &nbsp;·&nbsp; ${fmt_duration(total_dur)} merged &nbsp;·&nbsp; ${fmt_bytes(total_sz)} &nbsp;·&nbsp; ${g.length} parts</span>
+        <button class="btn-stitch-one btn-secondary">Stitch</button>
       </div>`;
       g.forEach((r, ri) => {
         const row = document.createElement('div');
@@ -612,6 +616,7 @@ async function find_stitch_candidates() {
         group.appendChild(row);
       });
       container.appendChild(group);
+      group.querySelector('.btn-stitch-one').addEventListener('click', () => stitch_one(g, group));
     });
 
     container.classList.remove('hidden');
@@ -625,70 +630,70 @@ async function find_stitch_candidates() {
   }
 }
 
-async function start_stitch_all() {
-  document.getElementById('btn-stitch-all').disabled = true;
-  document.getElementById('btn-find-stitch').disabled = true;
+function _set_stitch_ui_busy(busy) {
+  document.querySelectorAll('.btn-stitch-one').forEach(b => b.disabled = busy);
+  const all_btn = document.getElementById('btn-stitch-all');
+  if (all_btn) all_btn.disabled = busy;
+  document.getElementById('btn-find-stitch').disabled = busy;
+}
 
+// Shared stitch job runner. Calls on_success(ev) when stitch_complete with no errors.
+async function _run_stitch(groups, on_success) {
   const progress = document.getElementById('stitch-build-progress');
   const spinner  = document.getElementById('stitch-spinner');
   const status   = document.getElementById('stitch-status-msg');
   const log      = document.getElementById('stitch-log');
   const cancel   = document.getElementById('btn-cancel-stitch');
 
+  _set_stitch_ui_busy(true);
   progress.classList.remove('hidden');
   log.innerHTML = '';
   spinner.classList.remove('hidden');
   status.textContent = 'Starting…';
   cancel.disabled = false;
 
-  const res = await fetch('/api/catalog/stitch/start', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({groups: stitch_groups}),
-  });
-  if (!res.ok) {
-    log_line(log, 'Failed to start: ' + (await res.text()), 'log-err');
-    spinner.classList.add('hidden');
-    document.getElementById('btn-find-stitch').disabled = false;
-    return;
-  }
-
   const finish = () => {
     spinner.classList.add('hidden');
     cancel.disabled = true;
-    document.getElementById('btn-find-stitch').disabled = false;
+    _set_stitch_ui_busy(false);
   };
+
+  const res = await fetch('/api/catalog/stitch/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({groups}),
+  });
+  if (!res.ok) {
+    log_line(log, 'Failed to start: ' + (await res.text()), 'log-err');
+    finish();
+    return;
+  }
 
   const src = new EventSource('/api/catalog/stitch/stream');
   src.onmessage = e => {
     const ev = JSON.parse(e.data);
     if (ev.type === 'stitch_start') {
-      status.textContent = `Stitching ${ev.total_groups} group(s)…`;
+      if (ev.total_groups > 1) status.textContent = `Stitching ${ev.total_groups} group(s)…`;
     } else if (ev.type === 'stitch_file_start') {
-      log_line(log, `[${ev.index+1}/${ev.total}] ${ev.parts.join(' + ')} → ${ev.dest}`, 'log-start');
-      status.textContent = `[${ev.index+1}/${ev.total}] ${ev.dest.split('/').pop()}`;
+      const prefix = ev.total > 1 ? `[${ev.index+1}/${ev.total}] ` : '';
+      log_line(log, `${prefix}${ev.parts.join(' + ')} → ${ev.dest}`, 'log-start');
+      status.textContent = prefix + ev.dest.split('/').pop();
     } else if (ev.type === 'stitch_file_done') {
       log_line(log, `  ✓ merged · removed: ${ev.deleted.join(', ')}`, 'log-ok');
     } else if (ev.type === 'stitch_error') {
       log_line(log, `  ✗ ${ev.error}`, 'log-err');
-    } else if (ev.type === 'stitch_warning') {
-      log_line(log, `  ⚠ ${ev.msg}`, 'log-info');
-    } else if (ev.type === 'info') {
-      log_line(log, ev.msg);
+    } else if (ev.type === 'stitch_warning' || ev.type === 'info') {
+      log_line(log, ev.msg || ev.error);
     } else if (ev.type === 'stitch_complete') {
-      log_line(log, `Done. ${ev.stitched} group(s) stitched, ${ev.errors} error(s).`,
-        ev.errors > 0 ? 'log-err' : 'log-ok');
-      status.textContent = `Complete — ${ev.stitched} merged.`;
+      const ok = ev.errors === 0;
+      log_line(log, ok ? `Done. ${ev.stitched} group(s) stitched.` : `Finished with ${ev.errors} error(s).`,
+        ok ? 'log-ok' : 'log-err');
+      status.textContent = ok ? 'Complete.' : `${ev.errors} error(s).`;
       src.close();
       finish();
-      stitch_groups = [];
-      document.getElementById('stitch-list').classList.add('hidden');
-      document.getElementById('stitch-none').classList.remove('hidden');
-      document.getElementById('stitch-none').textContent = `Done — ${ev.stitched} recording(s) stitched.`;
-      document.getElementById('stitch-none').style.color = 'var(--success)';
-      load_catalog();
+      if (ok) on_success(ev);
     } else if (ev.type === 'cancelled') {
-      log_line(log, `Cancelled after ${ev.stitched} group(s).`, 'log-err');
+      log_line(log, 'Cancelled.', 'log-err');
       status.textContent = 'Cancelled.';
       src.close();
       finish();
@@ -699,6 +704,33 @@ async function start_stitch_all() {
     }
   };
   src.onerror = () => { src.close(); finish(); };
+}
+
+function stitch_one(g, group_el) {
+  _run_stitch([g], () => {
+    group_el.remove();
+    stitch_groups.splice(stitch_groups.indexOf(g), 1);
+    if (stitch_groups.length === 0) {
+      document.getElementById('stitch-list').classList.add('hidden');
+      const none = document.getElementById('stitch-none');
+      none.textContent = 'All groups stitched.';
+      none.style.color = 'var(--success)';
+      none.classList.remove('hidden');
+    }
+    load_catalog();
+  });
+}
+
+function start_stitch_all() {
+  _run_stitch(stitch_groups, ev => {
+    stitch_groups = [];
+    document.getElementById('stitch-list').classList.add('hidden');
+    const none = document.getElementById('stitch-none');
+    none.textContent = `Done — ${ev.stitched} recording(s) stitched.`;
+    none.style.color = 'var(--success)';
+    none.classList.remove('hidden');
+    load_catalog();
+  });
 }
 
 // ---------------------------------------------------------------------------

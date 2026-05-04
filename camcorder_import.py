@@ -23,6 +23,7 @@ from pathlib import Path
 
 ARCHIVE_DEFAULT = "/mnt/8tb/Camcorder Videos"
 PART_SIZE_THRESHOLD = 1_900_000_000  # camera splits recordings at ~2GB
+MAX_PART_SIZE      = 2_200_000_000  # anything larger is already merged
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +233,11 @@ def resolve_conflict(dest: Path) -> Path:
         i += 1
 
 
+def _ffmpeg_escape(path: str) -> str:
+    """Escape a path for an ffmpeg concat list file (single-quote escaping)."""
+    return path.replace("'", "'\\''")
+
+
 def concat_or_copy(parts: list[Path], dest: Path, dry_run: bool) -> bool:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if len(parts) == 1:
@@ -243,7 +249,7 @@ def concat_or_copy(parts: list[Path], dest: Path, dry_run: bool) -> bool:
     try:
         with open(list_file, "w") as fh:
             for p in parts:
-                fh.write(f"file '{p}'\n")
+                fh.write(f"file '{_ffmpeg_escape(str(p))}'\n")
         if dry_run:
             list_file.unlink(missing_ok=True)
             return True
@@ -292,8 +298,12 @@ def scan_new_recordings(mounts: list[Path], manifest_path: Path,
             needs_stitch = False
             if all_in_manifest and len(group) > 1 and archive is not None:
                 expected = output_path(archive, ts, group)
-                if not expected.exists() or expected.stat().st_size < size_bytes * 0.9:
-                    needs_stitch = True
+                expected_stitched = expected.with_stem(expected.stem + "_stitched")
+                merged_ok = (
+                    (expected.exists() and expected.stat().st_size >= size_bytes * 0.9)
+                    or (expected_stitched.exists() and expected_stitched.stat().st_size >= size_bytes * 0.9)
+                )
+                needs_stitch = not merged_ok
 
             already = all_in_manifest and not needs_stitch
             recordings.append({
@@ -426,20 +436,23 @@ def run_import(mounts: list[Path], archive: Path, manifest_path: Path,
 # Archive stitch candidates
 # ---------------------------------------------------------------------------
 
-def find_stitch_candidates(catalog: dict) -> list[list[dict]]:
+def find_stitch_candidates(catalog: dict, exclude_dirs: list[str] | None = None) -> list[list[dict]]:
     """
     Find groups of non-legacy archive recordings that appear to be individually-
     imported parts of the same recording (never merged).
     Criteria: prev size >= PART_SIZE_THRESHOLD and prev end timestamp ≈ curr start
-    (within 600 s tolerance — Canon pre-opens the next file while still writing
-    the current one, causing apparent overlaps of up to ~7 minutes).
+    Gap is signed (negative = Canon pre-open overlap, positive = real gap).
+    Any overlap passes; genuine gaps are allowed up to 60 s.
     """
+    prefixes = tuple((d.rstrip("/") + "/") for d in (exclude_dirs or []))
+
     recs = [
         r for r in catalog.get("recordings", [])
         if r.get("source") != "legacy_tvd"
+        and not (prefixes and r.get("path", "").startswith(prefixes))
         and r.get("recorded_at")
         and r.get("duration_seconds")
-        and r.get("size_bytes")
+        and r.get("size_bytes", 0) <= MAX_PART_SIZE
     ]
     recs = sorted(recs, key=lambda r: r["recorded_at"])
 
@@ -457,11 +470,13 @@ def find_stitch_candidates(catalog: dict) -> list[list[dict]]:
                 + prev["duration_seconds"]
             )
             curr_start = datetime.fromisoformat(rec["recorded_at"]).timestamp()
-            gap = abs(curr_start - prev_end)
+            # Signed gap: negative means Canon pre-opened the next file while
+            # still recording (overlap). Positive means a real gap between clips.
+            gap = curr_start - prev_end
         except (ValueError, TypeError):
             gap = float("inf")
 
-        if prev.get("size_bytes", 0) >= PART_SIZE_THRESHOLD and gap <= 600.0:
+        if prev.get("size_bytes", 0) >= PART_SIZE_THRESHOLD and gap <= 60.0:
             current.append(rec)
         else:
             if len(current) > 1:
@@ -502,25 +517,27 @@ def stitch_archive_parts(groups: list[list[dict]], archive: Path,
             errors += 1
             continue
 
-        dest = part_paths[0]  # merged file overwrites the first part
+        first = part_paths[0]
+        dest  = first.with_stem(first.stem + "_stitched")
         part_labels = [r["path"].split("/")[-1] for r in group]
         yield {
             "type": "stitch_file_start",
             "index": i,
             "total": total,
             "parts": part_labels,
-            "dest": group[0]["path"],
+            "dest": str(dest.relative_to(archive)),
         }
 
         ok = concat_or_copy(part_paths, dest, dry_run=False)
         if not ok:
+            dest.unlink(missing_ok=True)
             yield {"type": "stitch_error", "index": i, "error": "ffmpeg concat failed"}
             errors += 1
             continue
 
-        # Delete the extra part files (keep dest which is part_paths[0])
+        # Delete all original parts now that the stitched file exists
         deleted = []
-        for p in part_paths[1:]:
+        for p in part_paths:
             try:
                 p.unlink()
                 deleted.append(str(p.relative_to(archive)))
@@ -535,14 +552,14 @@ def stitch_archive_parts(groups: list[list[dict]], archive: Path,
         catalog["recordings"] = [
             r for r in catalog["recordings"] if r["path"] not in part_rel_paths
         ]
-        first = group[0]
+        first_rec = group[0]
         catalog["recordings"].append({
             "path": merged_path,
-            "recorded_at": first["recorded_at"],
+            "recorded_at": first_rec["recorded_at"],
             "duration_seconds": round(total_duration),
             "size_bytes": merged_size,
-            "imported_at": first.get("imported_at"),
-            "source": first.get("source", "canon_import"),
+            "imported_at": first_rec.get("imported_at"),
+            "source": first_rec.get("source", "canon_import"),
             "glacier_archived": False,
             "glacier_archive_id": None,
         })
