@@ -328,12 +328,14 @@ function render_catalog() {
   const total_secs     = recs.reduce((s, r) => s + (r.duration_seconds || 0), 0);
   const total_hours    = (total_secs / 3600).toFixed(1);
   const glacier_count  = recs.filter(r => r.glacier_archived).length;
+  const updated_str    = catalog_data.updated ? fmt_date(catalog_data.updated) : 'unknown';
 
   document.getElementById('catalog-stats').innerHTML = `
     <div class="stat-item"><strong>${recs.length}</strong>Recordings</div>
     <div class="stat-item"><strong>${total_hours}h</strong>Total footage</div>
     <div class="stat-item"><strong>${fmt_bytes(total_bytes)}</strong>Total size</div>
-    <div class="stat-item"><strong>${glacier_count}</strong>In Glacier</div>`;
+    <div class="stat-item"><strong>${glacier_count}</strong>In Glacier</div>
+    <div class="stat-item"><strong>${updated_str}</strong>Last built</div>`;
 
   // Populate year filter
   const years = [...new Set(recs.map(r => r.recorded_at?.slice(0,4)).filter(Boolean))].sort().reverse();

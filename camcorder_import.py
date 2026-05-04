@@ -431,7 +431,8 @@ def find_stitch_candidates(catalog: dict) -> list[list[dict]]:
     Find groups of non-legacy archive recordings that appear to be individually-
     imported parts of the same recording (never merged).
     Criteria: prev size >= PART_SIZE_THRESHOLD and prev end timestamp ≈ curr start
-    (within 60 s tolerance).
+    (within 600 s tolerance — Canon pre-opens the next file while still writing
+    the current one, causing apparent overlaps of up to ~7 minutes).
     """
     recs = [
         r for r in catalog.get("recordings", [])
@@ -460,7 +461,7 @@ def find_stitch_candidates(catalog: dict) -> list[list[dict]]:
         except (ValueError, TypeError):
             gap = float("inf")
 
-        if prev.get("size_bytes", 0) >= PART_SIZE_THRESHOLD and gap <= 60.0:
+        if prev.get("size_bytes", 0) >= PART_SIZE_THRESHOLD and gap <= 600.0:
             current.append(rec)
         else:
             if len(current) > 1:

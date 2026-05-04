@@ -244,6 +244,20 @@ button { cursor: pointer; font-family: inherit; font-size: 14px; border-radius: 
 .import-done.success { background: #dcfce7; color: #15803d; }
 .import-done.error   { background: #fee2e2; color: #b91c1c; }
 
+/* --------------------------------------------------------- catalog table */
+#catalog-table { table-layout: fixed; }
+#catalog-table th:nth-child(1) { width: 130px; }
+#catalog-table th:nth-child(2) { width: 80px; }
+#catalog-table th:nth-child(3) { width: 75px; }
+/* column 4 = Path, takes remaining space */
+#catalog-table th:nth-child(5) { width: 100px; }
+#catalog-table th:nth-child(6) { width: 85px; }
+#catalog-table td:nth-child(4) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* --------------------------------------------------------------- catalog */
 .catalog-controls { margin-bottom: 14px; }
 .stats-bar {
