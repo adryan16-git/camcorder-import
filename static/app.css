@@ -309,6 +309,16 @@ button { cursor: pointer; font-family: inherit; font-size: 14px; border-radius: 
   font-family: monospace;
 }
 .field input[type=text]:focus { outline: 2px solid var(--primary); border-color: transparent; }
+.field textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: monospace;
+  resize: vertical;
+}
+.field textarea:focus { outline: 2px solid var(--primary); border-color: transparent; }
 .field-hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
 .field-row { display: flex; align-items: center; gap: 14px; }
 .opt { font-weight: 400; color: var(--muted); font-size: 12px; }
@@ -328,6 +338,14 @@ button { cursor: pointer; font-family: inherit; font-size: 14px; border-radius: 
   margin-top: 10px;
 }
 .header-actions { display: flex; align-items: center; gap: 8px; }
+
+/* --------------------------------------------------------- stitch per-group */
+.stitch-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.btn-stitch-one { font-size: 12px; padding: 3px 10px; flex-shrink: 0; }
 
 /* ------------------------------------------------------------ duplicates */
 .dupe-group {

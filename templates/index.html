@@ -113,6 +113,34 @@
       </div>
     </div>
 
+    <div class="card" id="stitch-card">
+      <div class="card-header">
+        <h2>Stitch Candidates</h2>
+        <button id="btn-find-stitch" class="btn-secondary">Find Candidates</button>
+      </div>
+      <div id="stitch-empty" class="muted">Click "Find Candidates" to detect recordings that were imported as individual parts and need merging.</div>
+      <div id="stitch-none" class="hidden" style="color:var(--success);font-size:13px;">No stitch candidates found.</div>
+      <div id="stitch-build-progress" class="hidden">
+        <div class="build-status-row">
+          <span id="stitch-spinner" class="spinner"></span>
+          <span id="stitch-status-msg" class="muted">Stitching…</span>
+          <button id="btn-cancel-stitch" class="btn-danger-sm">Cancel</button>
+        </div>
+        <div id="stitch-log" class="log log-sm"></div>
+      </div>
+      <div id="stitch-list" class="hidden"></div>
+    </div>
+
+    <div class="card" id="duplicates-card">
+      <div class="card-header">
+        <h2>Duplicate Detection</h2>
+        <button id="btn-find-dupes" class="btn-secondary">Find Duplicates</button>
+      </div>
+      <div id="dupes-empty" class="muted">Click "Find Duplicates" to scan the catalog for matching recordings.</div>
+      <div id="dupes-none" class="hidden" style="color:var(--success);font-size:13px;">No duplicates found.</div>
+      <div id="dupes-list" class="hidden"></div>
+    </div>
+
     <div class="card">
       <div class="catalog-controls">
         <div id="catalog-stats" class="stats-bar"></div>
@@ -158,34 +186,6 @@
       </table>
     </div>
 
-    <div class="card" id="stitch-card">
-      <div class="card-header">
-        <h2>Stitch Candidates</h2>
-        <button id="btn-find-stitch" class="btn-secondary">Find Candidates</button>
-      </div>
-      <div id="stitch-empty" class="muted">Click "Find Candidates" to detect recordings that were imported as individual parts and need merging.</div>
-      <div id="stitch-none" class="hidden" style="color:var(--success);font-size:13px;">No stitch candidates found.</div>
-      <div id="stitch-build-progress" class="hidden">
-        <div class="build-status-row">
-          <span id="stitch-spinner" class="spinner"></span>
-          <span id="stitch-status-msg" class="muted">Stitching…</span>
-          <button id="btn-cancel-stitch" class="btn-danger-sm">Cancel</button>
-        </div>
-        <div id="stitch-log" class="log log-sm"></div>
-      </div>
-      <div id="stitch-list" class="hidden"></div>
-    </div>
-
-    <div class="card" id="duplicates-card">
-      <div class="card-header">
-        <h2>Duplicate Detection</h2>
-        <button id="btn-find-dupes" class="btn-secondary">Find Duplicates</button>
-      </div>
-      <div id="dupes-empty" class="muted">Click "Find Duplicates" to scan the catalog for matching recordings.</div>
-      <div id="dupes-none" class="hidden" style="color:var(--success);font-size:13px;">No duplicates found.</div>
-      <div id="dupes-list" class="hidden"></div>
-    </div>
-
   </section>
 
   <!-- =============================================================== SETTINGS -->
@@ -224,6 +224,11 @@
             <button type="button" class="btn-secondary btn-browse" data-target="s-camera-base">Browse…</button>
           </div>
           <p class="field-hint">Directory scanned for connected camera volumes.</p>
+        </div>
+        <div class="field">
+          <label for="s-stitch-exclude">Stitch scan — excluded directories <span class="opt">(one per line)</span></label>
+          <textarea id="s-stitch-exclude" name="stitch_exclude_dirs_text" rows="4" placeholder="Combine&#10;TVD_AVCHD"></textarea>
+          <p class="field-hint">Paths relative to the archive root. Files inside these directories are ignored when finding stitch candidates.</p>
         </div>
         <div class="field-row">
           <button type="submit" class="btn-primary">Save Settings</button>
