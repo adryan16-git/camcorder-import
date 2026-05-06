@@ -357,9 +357,8 @@ def run_import(mounts: list[Path], archive: Path, manifest_path: Path,
         mount = Path(rec["mount"])
         ts = datetime.fromisoformat(rec["recorded_at"])
         intended = output_path(archive, ts, parts)
-        # For stitch jobs, overwrite the existing under-sized file rather than
-        # creating a _2 conflict — the old file is just one unmerged part.
-        dest = intended if rec.get("needs_stitch") else resolve_conflict(intended)
+        dest = (intended.with_stem(intended.stem + "_stitched")
+                if rec["is_multipart"] else resolve_conflict(intended))
         names = " + ".join(rec["files"]) if rec["is_multipart"] else rec["files"][0]
 
         yield {
@@ -597,29 +596,41 @@ def build_catalog_from_archive(archive: Path, catalog_path: Path, cancel_event=N
     support mid-build cancellation.
     """
     catalog = load_catalog(catalog_path)
-    known_paths = {r["path"] for r in catalog["recordings"]}
+    known_paths = {r["path"]: r for r in catalog["recordings"]}
 
     all_mts = sorted(
         f for f in archive.rglob("*")
         if f.suffix.upper() == ".MTS" and f.is_file()
         and not any(p.name.startswith(".") for p in f.parents)
     )
+    all_mts_rel = {str(f.relative_to(archive)) for f in all_mts}
+
+    # Remove catalog entries whose files no longer exist on disk
+    removed = [r["path"] for r in catalog["recordings"] if r["path"] not in all_mts_rel]
+    if removed:
+        catalog["recordings"] = [r for r in catalog["recordings"] if r["path"] in all_mts_rel]
+        known_paths = {r["path"]: r for r in catalog["recordings"]}
+
     new_files = [f for f in all_mts if str(f.relative_to(archive)) not in known_paths]
 
+    # Files already cataloged whose on-disk size differs by >10% (e.g. stitched after cataloging)
+    stale_files = [
+        f for f in all_mts
+        if str(f.relative_to(archive)) in known_paths
+        and abs(f.stat().st_size - known_paths[str(f.relative_to(archive))].get("size_bytes", 0))
+           > known_paths[str(f.relative_to(archive))].get("size_bytes", 1) * 0.10
+    ]
+
+    total_work = len(new_files) + len(stale_files)
     yield {
         "type": "catalog_start",
         "new_files": len(new_files),
+        "stale_files": len(stale_files),
+        "removed_files": len(removed),
         "known_files": len(known_paths),
     }
 
-    added = 0
-    for i, f in enumerate(new_files):
-        if cancel_event and cancel_event.is_set():
-            yield {"type": "cancelled", "added": added, "total_so_far": len(catalog["recordings"])}
-            return
-        rel = str(f.relative_to(archive))
-        yield {"type": "catalog_file", "current": i + 1, "total": len(new_files), "path": rel}
-
+    def _probe_entry(f: Path, rel: str, existing: dict | None = None) -> dict:
         rel_upper = rel.upper()
         if "TVD_AVCHD" in rel_upper:
             source = "legacy_tvd"
@@ -650,17 +661,38 @@ def build_catalog_from_archive(archive: Path, catalog_path: Path, cancel_event=N
                         pass
                     break
 
-        catalog["recordings"].append({
+        return {
             "path": rel,
             "recorded_at": recorded_at.isoformat() if recorded_at else None,
             "duration_seconds": round(duration) if duration else None,
             "size_bytes": f.stat().st_size,
-            "imported_at": None,
+            "imported_at": existing.get("imported_at") if existing else None,
             "source": source,
-            "glacier_archived": False,
-            "glacier_archive_id": None,
-        })
+            "glacier_archived": existing.get("glacier_archived", False) if existing else False,
+            "glacier_archive_id": existing.get("glacier_archive_id") if existing else None,
+        }
+
+    added = 0
+    updated = 0
+
+    for i, f in enumerate(new_files):
+        if cancel_event and cancel_event.is_set():
+            yield {"type": "cancelled", "added": added, "updated": updated, "total_so_far": len(catalog["recordings"])}
+            return
+        rel = str(f.relative_to(archive))
+        yield {"type": "catalog_file", "current": i + 1, "total": total_work, "path": rel}
+        catalog["recordings"].append(_probe_entry(f, rel))
         added += 1
+
+    rec_by_path = {r["path"]: r for r in catalog["recordings"]}
+    for i, f in enumerate(stale_files):
+        if cancel_event and cancel_event.is_set():
+            yield {"type": "cancelled", "added": added, "updated": updated, "total_so_far": len(catalog["recordings"])}
+            return
+        rel = str(f.relative_to(archive))
+        yield {"type": "catalog_file", "current": len(new_files) + i + 1, "total": total_work, "path": rel}
+        rec_by_path[rel].update(_probe_entry(f, rel, existing=rec_by_path[rel]))
+        updated += 1
 
     catalog["updated"] = datetime.now().isoformat()
     save_catalog(catalog_path, catalog)
@@ -668,6 +700,8 @@ def build_catalog_from_archive(archive: Path, catalog_path: Path, cancel_event=N
     yield {
         "type": "catalog_complete",
         "added": added,
+        "updated": updated,
+        "removed": len(removed),
         "total_recordings": len(catalog["recordings"]),
     }
 

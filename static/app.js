@@ -431,8 +431,10 @@ async function build_catalog() {
   src.onmessage = e => {
     const ev = JSON.parse(e.data);
     if (ev.type === 'catalog_start') {
-      status_msg.textContent = `Scanning ${ev.new_files} new files…`;
-      log_line(log, `${ev.known_files} already cataloged · ${ev.new_files} new files to scan`);
+      const stale = ev.stale_files ? ` · ${ev.stale_files} stale` : '';
+      const removed = ev.removed_files ? ` · removed ${ev.removed_files} missing` : '';
+      status_msg.textContent = `Scanning ${ev.new_files} new + ${ev.stale_files || 0} stale files…`;
+      log_line(log, `${ev.known_files} already cataloged · ${ev.new_files} new${stale}${removed}`);
     } else if (ev.type === 'catalog_file') {
       const bar = document.getElementById('catalog-bar');
       bar.style.width = (ev.current / ev.total * 100) + '%';
@@ -441,14 +443,16 @@ async function build_catalog() {
         log_line(log, `[${ev.current}/${ev.total}] ${ev.path}`);
       }
     } else if (ev.type === 'catalog_complete') {
-      log_line(log, `Done. Added ${ev.added} entries · ${ev.total_recordings} total recordings.`, 'log-ok');
+      const upd = ev.updated ? ` · updated ${ev.updated}` : '';
+      const rmvd = ev.removed ? ` · removed ${ev.removed}` : '';
+      log_line(log, `Done. Added ${ev.added}${upd}${rmvd} · ${ev.total_recordings} total recordings.`, 'log-ok');
       status_msg.textContent = `Complete — ${ev.total_recordings} recordings.`;
       document.getElementById('catalog-bar').style.width = '100%';
       src.close();
       finish();
       load_catalog();
     } else if (ev.type === 'cancelled') {
-      log_line(log, `Cancelled. Saved ${ev.added} entries so far.`, 'log-err');
+      log_line(log, `Cancelled. Added ${ev.added}, updated ${ev.updated || 0} entries so far.`, 'log-err');
       status_msg.textContent = 'Cancelled.';
       src.close();
       finish();
