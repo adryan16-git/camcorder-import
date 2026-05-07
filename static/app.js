@@ -451,6 +451,8 @@ async function build_catalog() {
       src.close();
       finish();
       load_catalog();
+      load_status();
+      reset_stitch_panel();
     } else if (ev.type === 'cancelled') {
       log_line(log, `Cancelled. Added ${ev.added}, updated ${ev.updated || 0} entries so far.`, 'log-err');
       status_msg.textContent = 'Cancelled.';
@@ -568,6 +570,14 @@ async function find_duplicates() {
 // ---------------------------------------------------------------------------
 
 let stitch_groups = [];
+
+function reset_stitch_panel() {
+  stitch_groups = [];
+  document.getElementById('stitch-list').classList.add('hidden');
+  document.getElementById('stitch-none').classList.add('hidden');
+  document.getElementById('stitch-empty').textContent = 'Click "Find Candidates" to detect recordings that were imported as individual parts and need merging.';
+  document.getElementById('stitch-empty').classList.remove('hidden');
+}
 
 async function find_stitch_candidates() {
   const btn = document.getElementById('btn-find-stitch');

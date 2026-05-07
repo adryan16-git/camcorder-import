@@ -306,6 +306,17 @@ def scan_new_recordings(mounts: list[Path], manifest_path: Path,
                 needs_stitch = not merged_ok
 
             already = all_in_manifest and not needs_stitch
+
+            # Secondary guard: if the expected archive output already exists at the
+            # right size, treat as already imported even if the manifest entry is
+            # missing (e.g. same recording on both camera volumes, or a stale manifest).
+            if not already and archive is not None and ts is not None:
+                exp = output_path(archive, ts, group)
+                exp_stitched = exp.with_stem(exp.stem + "_stitched")
+                if (exp.exists() and exp.stat().st_size >= size_bytes * 0.9) or \
+                   (exp_stitched.exists() and exp_stitched.stat().st_size >= size_bytes * 0.9):
+                    already = True
+
             recordings.append({
                 "mount": str(mount),
                 "files": [f.name for f in group],
