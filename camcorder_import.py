@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-ARCHIVE_DEFAULT = "/mnt/8tb/Camcorder Videos"
+ARCHIVE_DEFAULT = "/mnt/Server8TB/Family/CamcorderVideos"
 PART_SIZE_THRESHOLD = 1_900_000_000  # camera splits recordings at ~2GB
 MAX_PART_SIZE      = 2_200_000_000  # anything larger is already merged
 
@@ -305,7 +305,16 @@ def scan_new_recordings(mounts: list[Path], manifest_path: Path,
                 )
                 needs_stitch = not merged_ok
 
-            already = all_in_manifest and not needs_stitch
+            # For single-file recordings, verify the output still exists on disk.
+            # The manifest records the import but doesn't track deletions, so a file
+            # deleted from the archive would otherwise be silently skipped forever.
+            missing_from_archive = False
+            if all_in_manifest and len(group) == 1 and archive is not None and ts is not None:
+                expected = output_path(archive, ts, group)
+                if not (expected.exists() and expected.stat().st_size >= size_bytes * 0.9):
+                    missing_from_archive = True
+
+            already = all_in_manifest and not needs_stitch and not missing_from_archive
 
             # Secondary guard: if the expected archive output already exists at the
             # right size, treat as already imported even if the manifest entry is
@@ -326,6 +335,7 @@ def scan_new_recordings(mounts: list[Path], manifest_path: Path,
                 "size_bytes": size_bytes,
                 "already_imported": already,
                 "needs_stitch": needs_stitch,
+                "missing_from_archive": missing_from_archive,
                 "is_multipart": len(group) > 1,
             })
     return recordings
@@ -715,6 +725,150 @@ def build_catalog_from_archive(archive: Path, catalog_path: Path, cancel_event=N
         "removed": len(removed),
         "total_recordings": len(catalog["recordings"]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Glacier sync
+# ---------------------------------------------------------------------------
+
+def _s3_client(aws_key: str, aws_secret: str, region: str):
+    try:
+        import boto3
+    except ImportError:
+        raise RuntimeError("boto3 is not installed — run: pip install boto3")
+    return boto3.client(
+        "s3",
+        aws_access_key_id=aws_key,
+        aws_secret_access_key=aws_secret,
+        region_name=region,
+    )
+
+
+def glacier_reconcile(catalog_path: Path, bucket: str, prefix: str,
+                      aws_key: str, aws_secret: str, region: str):
+    """Generator: list S3 objects under prefix, mark matching catalog entries as archived."""
+    client = _s3_client(aws_key, aws_secret, region)
+
+    # Collect all S3 keys under prefix
+    s3_paths: set[str] = set()
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.startswith(prefix):
+                s3_paths.add(key[len(prefix):])  # strip prefix → relative path
+
+    yield {"type": "reconcile_start", "s3_count": len(s3_paths)}
+
+    catalog = load_catalog(catalog_path)
+    updated = already = not_found = 0
+    for rec in catalog["recordings"]:
+        path = rec.get("path", "")
+        if path in s3_paths:
+            if rec.get("glacier_archived"):
+                already += 1
+            else:
+                rec["glacier_archived"] = True
+                rec["glacier_archive_id"] = f"s3://{bucket}/{prefix}{path}"
+                updated += 1
+        else:
+            not_found += 1
+
+    if updated:
+        save_catalog(catalog_path, catalog)
+
+    yield {
+        "type": "reconcile_complete",
+        "updated": updated,
+        "already_archived": already,
+        "not_found": not_found,
+    }
+
+
+def glacier_upload(catalog_path: Path, archive_path: Path, bucket: str, prefix: str,
+                   aws_key: str, aws_secret: str, region: str, cancel_event=None):
+    """Generator: upload un-archived catalog entries to S3 Glacier Flexible Retrieval."""
+    import queue as _queue
+    client = _s3_client(aws_key, aws_secret, region)
+
+    catalog = load_catalog(catalog_path)
+    pending = [
+        r for r in catalog["recordings"]
+        if not r.get("glacier_archived")
+        and (archive_path / r["path"]).is_file()
+    ]
+    skipped = len(catalog["recordings"]) - len(pending) - sum(
+        1 for r in catalog["recordings"]
+        if not r.get("glacier_archived") and not (archive_path / r["path"]).is_file()
+    )
+    missing = sum(
+        1 for r in catalog["recordings"]
+        if not r.get("glacier_archived") and not (archive_path / r["path"]).is_file()
+    )
+    total_bytes = sum(r.get("size_bytes", 0) for r in pending)
+
+    yield {
+        "type": "upload_start",
+        "total_files": len(pending),
+        "missing_files": missing,
+        "total_bytes": total_bytes,
+    }
+
+    if not pending:
+        yield {"type": "upload_complete", "uploaded": 0, "errors": 0, "skipped": skipped}
+        return
+
+    uploaded = errors = 0
+    rec_by_path = {r["path"]: r for r in catalog["recordings"]}
+
+    for i, rec in enumerate(pending):
+        if cancel_event and cancel_event.is_set():
+            yield {"type": "cancelled", "uploaded": uploaded, "errors": errors}
+            return
+
+        rel = rec["path"]
+        local_path = archive_path / rel
+        s3_key = prefix + rel
+        size = rec.get("size_bytes", 0)
+
+        yield {"type": "upload_file", "index": i, "total": len(pending),
+               "path": rel, "size_bytes": size}
+
+        # Progress callback puts events into a local queue; we drain it after upload.
+        progress_q: _queue.SimpleQueue = _queue.SimpleQueue()
+        bytes_so_far = 0
+
+        def _progress(chunk, _q=progress_q):
+            _q.put(chunk)
+
+        try:
+            from boto3.s3.transfer import TransferConfig
+            config = TransferConfig(multipart_threshold=64 * 1024 * 1024,
+                                    multipart_chunksize=64 * 1024 * 1024)
+            client.upload_file(
+                str(local_path), bucket, s3_key,
+                ExtraArgs={"StorageClass": "GLACIER"},
+                Callback=_progress,
+                Config=config,
+            )
+            # Drain progress queue
+            while not progress_q.empty():
+                bytes_so_far += progress_q.get_nowait()
+            yield {"type": "upload_progress", "path": rel,
+                   "bytes_done": size, "total_bytes": size}
+
+            rec_by_path[rel]["glacier_archived"] = True
+            rec_by_path[rel]["glacier_archive_id"] = f"s3://{bucket}/{s3_key}"
+            save_catalog(catalog_path, catalog)
+            uploaded += 1
+            yield {"type": "upload_done", "path": rel}
+
+        except Exception as exc:
+            errors += 1
+            yield {"type": "upload_error", "path": rel, "msg": str(exc)}
+
+    yield {"type": "upload_complete", "uploaded": uploaded,
+           "errors": errors, "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------

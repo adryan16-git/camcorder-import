@@ -29,6 +29,11 @@ DEFAULT_SETTINGS = {
     "catalog_path": "",
     "camera_base_path": f"/media/{_user}",
     "stitch_exclude_dirs": ["Combine", "TVD_AVCHD"],
+    "aws_access_key_id": "",
+    "aws_secret_access_key": "",
+    "aws_region": "us-east-2",
+    "glacier_bucket": "richardson-family-archive",
+    "glacier_prefix": "CamcorderVideos/",
 }
 
 
@@ -322,6 +327,71 @@ def catalog_build_start():
 def catalog_build_stream():
     return Response(
         stream_with_context(_sse_stream("catalog_build")),
+        content_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes — Glacier sync
+# ---------------------------------------------------------------------------
+
+def _glacier_settings(settings: dict):
+    """Return (bucket, prefix, key, secret, region) or raise ValueError."""
+    key = settings.get("aws_access_key_id", "").strip()
+    secret = settings.get("aws_secret_access_key", "").strip()
+    if not key or not secret:
+        raise ValueError("AWS credentials not configured in Settings")
+    return (
+        settings.get("glacier_bucket", "richardson-family-archive"),
+        settings.get("glacier_prefix", "CamcorderVideos/"),
+        key, secret,
+        settings.get("aws_region", "us-east-2"),
+    )
+
+
+@app.route("/api/glacier/reconcile/start", methods=["POST"])
+def glacier_reconcile_start():
+    settings = load_settings()
+    _, _, catalog_path = resolved_paths(settings)
+    try:
+        bucket, prefix, key, secret, region = _glacier_settings(settings)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not _start_job("glacier_reconcile", ci.glacier_reconcile,
+                      catalog_path, bucket, prefix, key, secret, region):
+        return jsonify({"error": "A job is already running"}), 409
+    return jsonify({"status": "started"})
+
+
+@app.route("/api/glacier/reconcile/stream")
+def glacier_reconcile_stream():
+    return Response(
+        stream_with_context(_sse_stream("glacier_reconcile")),
+        content_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.route("/api/glacier/upload/start", methods=["POST"])
+def glacier_upload_start():
+    settings = load_settings()
+    archive, _, catalog_path = resolved_paths(settings)
+    try:
+        bucket, prefix, key, secret, region = _glacier_settings(settings)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not _start_job("glacier_upload", ci.glacier_upload,
+                      catalog_path, archive, bucket, prefix, key, secret, region,
+                      _cancel_event):
+        return jsonify({"error": "A job is already running"}), 409
+    return jsonify({"status": "started"})
+
+
+@app.route("/api/glacier/upload/stream")
+def glacier_upload_stream():
+    return Response(
+        stream_with_context(_sse_stream("glacier_upload")),
         content_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

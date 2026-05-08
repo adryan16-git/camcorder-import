@@ -328,6 +328,7 @@ function render_catalog() {
   const total_secs     = recs.reduce((s, r) => s + (r.duration_seconds || 0), 0);
   const total_hours    = (total_secs / 3600).toFixed(1);
   const glacier_count  = recs.filter(r => r.glacier_archived).length;
+  const not_archived   = recs.length - glacier_count;
   const updated_str    = catalog_data.updated ? fmt_date(catalog_data.updated) : 'unknown';
 
   document.getElementById('catalog-stats').innerHTML = `
@@ -336,6 +337,19 @@ function render_catalog() {
     <div class="stat-item"><strong>${fmt_bytes(total_bytes)}</strong>Total size</div>
     <div class="stat-item"><strong>${glacier_count}</strong>In Glacier</div>
     <div class="stat-item"><strong>${updated_str}</strong>Last built</div>`;
+
+  // Update Glacier card summary
+  const not_archived_bytes = recs
+    .filter(r => !r.glacier_archived)
+    .reduce((s, r) => s + (r.size_bytes || 0), 0);
+  const glacier_summary = document.getElementById('glacier-summary');
+  if (not_archived === 0) {
+    glacier_summary.textContent = `All ${recs.length} recordings are archived to Glacier.`;
+    glacier_summary.style.color = 'var(--success)';
+  } else {
+    glacier_summary.textContent = `${not_archived} file(s) not yet archived · ${fmt_bytes(not_archived_bytes)}`;
+    glacier_summary.style.color = '';
+  }
 
   // Populate year filter
   const years = [...new Set(recs.map(r => r.recorded_at?.slice(0,4)).filter(Boolean))].sort().reverse();
@@ -481,6 +495,11 @@ async function load_settings_form() {
   document.getElementById('s-catalog').value        = s.catalog_path    || '';
   document.getElementById('s-camera-base').value    = s.camera_base_path || '';
   document.getElementById('s-stitch-exclude').value = (s.stitch_exclude_dirs || []).join('\n');
+  document.getElementById('s-aws-key').value        = s.aws_access_key_id    || '';
+  document.getElementById('s-aws-secret').value     = s.aws_secret_access_key || '';
+  document.getElementById('s-aws-region').value     = s.aws_region      || 'us-east-2';
+  document.getElementById('s-glacier-bucket').value = s.glacier_bucket  || 'richardson-family-archive';
+  document.getElementById('s-glacier-prefix').value = s.glacier_prefix  || 'CamcorderVideos/';
 
   document.getElementById('archive-display').textContent = s.archive_path || '(not set)';
 }
@@ -488,12 +507,17 @@ async function load_settings_form() {
 document.getElementById('settings-form').addEventListener('submit', async e => {
   e.preventDefault();
   const data = {
-    archive_path:       document.getElementById('s-archive').value.trim(),
-    manifest_path:      document.getElementById('s-manifest').value.trim(),
-    catalog_path:       document.getElementById('s-catalog').value.trim(),
-    camera_base_path:   document.getElementById('s-camera-base').value.trim(),
-    stitch_exclude_dirs: document.getElementById('s-stitch-exclude').value
+    archive_path:          document.getElementById('s-archive').value.trim(),
+    manifest_path:         document.getElementById('s-manifest').value.trim(),
+    catalog_path:          document.getElementById('s-catalog').value.trim(),
+    camera_base_path:      document.getElementById('s-camera-base').value.trim(),
+    stitch_exclude_dirs:   document.getElementById('s-stitch-exclude').value
       .split('\n').map(s => s.trim()).filter(Boolean),
+    aws_access_key_id:     document.getElementById('s-aws-key').value.trim(),
+    aws_secret_access_key: document.getElementById('s-aws-secret').value.trim(),
+    aws_region:            document.getElementById('s-aws-region').value.trim(),
+    glacier_bucket:        document.getElementById('s-glacier-bucket').value.trim(),
+    glacier_prefix:        document.getElementById('s-glacier-prefix').value.trim(),
   };
   await fetch('/api/settings', {
     method: 'POST',
@@ -748,6 +772,131 @@ function start_stitch_all() {
 }
 
 // ---------------------------------------------------------------------------
+// Glacier sync
+// ---------------------------------------------------------------------------
+
+function _glacier_set_busy(busy) {
+  document.getElementById('btn-glacier-reconcile').disabled = busy;
+  document.getElementById('btn-glacier-upload').disabled = busy;
+  document.getElementById('glacier-progress').classList.toggle('hidden', !busy);
+  if (busy) {
+    document.getElementById('glacier-bar').style.width = '0%';
+    document.getElementById('glacier-log').innerHTML = '';
+  }
+}
+
+async function glacier_reconcile() {
+  _glacier_set_busy(true);
+  const status = document.getElementById('glacier-status-msg');
+  const log = document.getElementById('glacier-log');
+  status.textContent = 'Connecting to S3…';
+
+  const start_res = await fetch('/api/glacier/reconcile/start', {method: 'POST'});
+  if (!start_res.ok) {
+    const err = await start_res.json();
+    log_line(log, 'Error: ' + (err.error || start_res.statusText), 'log-err');
+    _glacier_set_busy(false);
+    return;
+  }
+
+  const src = new EventSource('/api/glacier/reconcile/stream');
+  src.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'reconcile_start') {
+      status.textContent = `Found ${ev.s3_count} objects in S3. Matching against catalog…`;
+      log_line(log, `S3 returned ${ev.s3_count} objects under prefix.`);
+    } else if (ev.type === 'reconcile_complete') {
+      document.getElementById('glacier-bar').style.width = '100%';
+      log_line(log, `Done. Marked ${ev.updated} new · ${ev.already_archived} already archived · ${ev.not_found} not in S3.`, 'log-ok');
+      status.textContent = `Complete — ${ev.updated} newly marked as archived.`;
+      src.close();
+      _glacier_set_busy(false);
+      load_catalog();
+    } else if (ev.type === 'error') {
+      log_line(log, 'Error: ' + ev.msg, 'log-err');
+      src.close();
+      _glacier_set_busy(false);
+    }
+  };
+  src.onerror = () => { src.close(); _glacier_set_busy(false); };
+}
+
+async function glacier_upload() {
+  _glacier_set_busy(true);
+  const status = document.getElementById('glacier-status-msg');
+  const log = document.getElementById('glacier-log');
+  const bar = document.getElementById('glacier-bar');
+  status.textContent = 'Starting upload…';
+
+  const start_res = await fetch('/api/glacier/upload/start', {method: 'POST'});
+  if (!start_res.ok) {
+    const err = await start_res.json();
+    log_line(log, 'Error: ' + (err.error || start_res.statusText), 'log-err');
+    _glacier_set_busy(false);
+    return;
+  }
+
+  let total_bytes = 0;
+  let current_file_bytes = 0;
+  let current_file_size = 0;
+  let files_done = 0;
+  let total_files = 0;
+
+  const src = new EventSource('/api/glacier/upload/stream');
+  src.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'upload_start') {
+      total_files = ev.total_files;
+      total_bytes = ev.total_bytes;
+      if (ev.missing_files) log_line(log, `${ev.missing_files} file(s) not found on disk — skipped.`);
+      if (total_files === 0) {
+        log_line(log, 'All files already archived. Nothing to upload.', 'log-ok');
+        status.textContent = 'Nothing to upload.';
+        src.close();
+        _glacier_set_busy(false);
+        return;
+      }
+      log_line(log, `Uploading ${total_files} file(s) · ${fmt_bytes(total_bytes)} total`);
+    } else if (ev.type === 'upload_file') {
+      current_file_size = ev.size_bytes;
+      current_file_bytes = 0;
+      status.textContent = `[${ev.index + 1}/${ev.total}] ${ev.path.split('/').pop()}`;
+      log_line(log, `↑ ${ev.path} (${fmt_bytes(ev.size_bytes)})`);
+    } else if (ev.type === 'upload_progress') {
+      current_file_bytes = ev.bytes_done;
+      const pct = total_bytes > 0
+        ? Math.round((files_done * (total_bytes / total_files) + (ev.bytes_done / ev.total_bytes) * (total_bytes / total_files)) / total_bytes * 100)
+        : 0;
+      bar.style.width = Math.min(pct, 99) + '%';
+    } else if (ev.type === 'upload_done') {
+      files_done++;
+      bar.style.width = Math.round(files_done / total_files * 100) + '%';
+    } else if (ev.type === 'upload_error') {
+      log_line(log, `✗ ${ev.path}: ${ev.msg}`, 'log-err');
+    } else if (ev.type === 'upload_complete') {
+      bar.style.width = '100%';
+      const errs = ev.errors ? ` · ${ev.errors} error(s)` : '';
+      log_line(log, `Done. ${ev.uploaded} uploaded${errs}.`, ev.errors ? 'log-err' : 'log-ok');
+      status.textContent = `Complete — ${ev.uploaded} file(s) uploaded.`;
+      src.close();
+      _glacier_set_busy(false);
+      load_catalog();
+      load_status();
+    } else if (ev.type === 'cancelled') {
+      log_line(log, `Cancelled. ${ev.uploaded} uploaded so far.`, 'log-err');
+      status.textContent = 'Cancelled.';
+      src.close();
+      _glacier_set_busy(false);
+    } else if (ev.type === 'error') {
+      log_line(log, 'Error: ' + ev.msg, 'log-err');
+      src.close();
+      _glacier_set_busy(false);
+    }
+  };
+  src.onerror = () => { src.close(); _glacier_set_busy(false); };
+}
+
+// ---------------------------------------------------------------------------
 // Path browser modal
 // ---------------------------------------------------------------------------
 
@@ -868,6 +1017,9 @@ document.getElementById('btn-find-dupes').addEventListener('click', find_duplica
 document.getElementById('btn-cancel-catalog').addEventListener('click', cancel_job);
 document.getElementById('btn-find-stitch').addEventListener('click', find_stitch_candidates);
 document.getElementById('btn-cancel-stitch').addEventListener('click', cancel_job);
+document.getElementById('btn-glacier-reconcile').addEventListener('click', glacier_reconcile);
+document.getElementById('btn-glacier-upload').addEventListener('click', glacier_upload);
+document.getElementById('btn-cancel-glacier').addEventListener('click', cancel_job);
 document.getElementById('filter-year').addEventListener('change', apply_catalog_filters);
 document.getElementById('filter-source').addEventListener('change', apply_catalog_filters);
 document.getElementById('filter-glacier').addEventListener('change', apply_catalog_filters);

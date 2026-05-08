@@ -2,5 +2,11 @@
   "archive_path": "/mnt/8tb/Camcorder Videos",
   "manifest_path": "",
   "catalog_path": "",
-  "camera_base_path": "/media/your-username"
+  "camera_base_path": "/media/your-username",
+  "stitch_exclude_dirs": ["Combine", "TVD_AVCHD"],
+  "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE",
+  "aws_secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+  "aws_region": "us-east-2",
+  "glacier_bucket": "richardson-family-archive",
+  "glacier_prefix": "CamcorderVideos/"
 }

@@ -131,6 +131,28 @@
       <div id="stitch-list" class="hidden"></div>
     </div>
 
+    <div class="card" id="glacier-card">
+      <div class="card-header">
+        <h2>Glacier Sync</h2>
+        <div class="header-actions">
+          <button id="btn-glacier-reconcile" class="btn-secondary">Reconcile with S3</button>
+          <button id="btn-glacier-upload" class="btn-secondary">Upload Unarchived</button>
+        </div>
+      </div>
+      <div id="glacier-summary" class="muted">Load catalog to see archive status.</div>
+      <div id="glacier-progress" class="hidden">
+        <div class="build-status-row">
+          <span id="glacier-spinner" class="spinner"></span>
+          <span id="glacier-status-msg" class="muted">Starting…</span>
+          <button id="btn-cancel-glacier" class="btn-danger-sm">Cancel</button>
+        </div>
+        <div class="progress-bar-wrap">
+          <div id="glacier-bar" class="progress-bar" style="width:0%"></div>
+        </div>
+        <div id="glacier-log" class="log log-sm"></div>
+      </div>
+    </div>
+
     <div class="card" id="duplicates-card">
       <div class="card-header">
         <h2>Duplicate Detection</h2>
@@ -229,6 +251,28 @@
           <label for="s-stitch-exclude">Stitch scan — excluded directories <span class="opt">(one per line)</span></label>
           <textarea id="s-stitch-exclude" name="stitch_exclude_dirs_text" rows="4" placeholder="Combine&#10;TVD_AVCHD"></textarea>
           <p class="field-hint">Paths relative to the archive root. Files inside these directories are ignored when finding stitch candidates.</p>
+        </div>
+        <div class="field">
+          <label for="s-aws-key">AWS Access Key ID</label>
+          <input id="s-aws-key" name="aws_access_key_id" type="text" placeholder="AKIAIOSFODNN7EXAMPLE" autocomplete="off">
+          <p class="field-hint">IAM credentials for S3 Glacier uploads. Stored locally, never committed to git.</p>
+        </div>
+        <div class="field">
+          <label for="s-aws-secret">AWS Secret Access Key</label>
+          <input id="s-aws-secret" name="aws_secret_access_key" type="password" placeholder="••••••••••••••••" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="s-aws-region">AWS Region</label>
+          <input id="s-aws-region" name="aws_region" type="text" placeholder="us-east-2">
+        </div>
+        <div class="field">
+          <label for="s-glacier-bucket">S3 Bucket</label>
+          <input id="s-glacier-bucket" name="glacier_bucket" type="text" placeholder="richardson-family-archive">
+        </div>
+        <div class="field">
+          <label for="s-glacier-prefix">S3 Key Prefix</label>
+          <input id="s-glacier-prefix" name="glacier_prefix" type="text" placeholder="CamcorderVideos/">
+          <p class="field-hint">Path prefix within the bucket. Must end with /.</p>
         </div>
         <div class="field-row">
           <button type="submit" class="btn-primary">Save Settings</button>
