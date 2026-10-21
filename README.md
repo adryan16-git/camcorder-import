@@ -31,9 +31,12 @@ bash install.sh
 The installer will:
 1. Verify Python 3.8+ and ffprobe are available
 2. Create a local virtualenv at `./venv/`
-3. Install `flask`
+3. Install `flask` and `boto3`
 4. Copy `settings.example.json` → `settings.json` for you to edit
-5. Optionally create a `.desktop` launcher
+5. Create `launch.sh`, a "Canon Import Tool" application-menu entry, a
+   `camcorder` command (`~/.local/bin/camcorder`), and a user-level systemd
+   service with boot auto-start (all paths are derived from the install
+   location, so a new machine just needs the clone + install)
 
 ## Configure
 
@@ -70,11 +73,26 @@ sudo mount -t cifs "//192.168.1.x/ShareName" /mnt/nas -o guest,uid=$(id -u),gid=
 
 ## Start the app
 
+`bash install.sh` (see above) sets up every method below with the correct paths.
+
+**Easiest** — one command that health-checks the server, starts it via the venv
+if it isn't already running, then opens the browser:
+
+```bash
+~/projects/camcorder-import/launch.sh   # "Canon Import Tool" in the app menu
+camcorder                               # same thing: symlink in ~/.local/bin
+```
+
+Log output goes to `~/.cache/camcorder-import.log`.
+
+**Manually:**
+
 ```bash
 ./venv/bin/python app.py
 ```
 
-Then open **http://localhost:8080** in a browser.
+Then open **http://localhost:8080** in a browser (desktop entry also available as
+"Canon Import Tool" in the applications menu).
 
 ## Usage
 
@@ -147,31 +165,46 @@ Build/Update — it adds new files and preserves all existing metadata including
 └── catalog.json
 ```
 
-## Running as a service (optional)
+## Running as a service
 
-To start automatically on boot, create `/etc/systemd/system/canon-import.service`:
+`bash install.sh` installs and enables a **user-level systemd service** so the
+app starts at boot and auto-restarts on crash — your browser bookmark to
+`http://localhost:8080` then always works, no launcher needed. It also enables
+`loginctl enable-linger` so the service starts even before you log in.
+
+The unit lives at `~/.config/systemd/user/canon-import.service`:
 
 ```ini
 [Unit]
-Description=Canon Import Tool
-After=network.target
+Description=Canon Import Tool (Flask web UI on port 8080)
+After=default.target
 
 [Service]
-User=your-username
 WorkingDirectory=/path/to/camcorder-import
 ExecStart=/path/to/camcorder-import/venv/bin/python app.py
 Restart=on-failure
+RestartSec=3
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 ```
 
-Then enable it:
+Manage it with:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now canon-import
+systemctl --user status canon-import    # check state / recent log lines
+journalctl --user -u canon-import -f    # follow logs
+systemctl --user restart canon-import   # restart
+systemctl --user disable canon-import   # turn off boot-start
 ```
+
+Notes:
+
+- Stop any manually started copy before enabling the service, or the port will
+  clash: `pkill -f "venv/bin/python app.py"`
+- If the machine reboots before systemd has taken over, `launch.sh` (menu item
+  or `~/.local/bin/camcorder`) still works as a fallback: it starts the server
+  itself if systemd hasn't.
 
 The UI will be available at `http://localhost:8080` (or the machine's LAN IP).
 

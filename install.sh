@@ -58,28 +58,107 @@ if [ ! -f "settings.json" ]; then
   echo -e "${YELLOW}!${NC} Created settings.json from example — edit it to set your archive path."
 fi
 
-# --- Optional .desktop launcher ---
-echo ""
-create_desktop=""
-if [ -t 0 ]; then
-  read -r -p "Create a desktop launcher? [y/N] " create_desktop
+# --- Optional launchers + auto-start service ---
+# launch.sh: health-checks the server, starts it via the venv if needed,
+# then opens the browser. Used by all launchers below.
+if [ ! -x "launch.sh" ]; then
+  echo ""
+  echo "launch.sh not found — creating it..."
+  cat > launch.sh <<'EOF'
+#!/bin/bash
+# Start the Canon Import Tool server (if not already running) and open the browser.
+# Safe to run from terminal, app launcher, or cron — returns immediately.
+cd "$(dirname "$0")"
+
+BASE_URL="http://localhost:8080"
+LOGFILE="$HOME/.cache/camcorder-import.log"
+
+up() { curl -s -o /dev/null --max-time 1 "$BASE_URL"; }
+
+if ! up; then
+    nohup setsid ./venv/bin/python app.py > "$LOGFILE" 2>&1 &
+    disown
+    # Wait up to 10s for the server to come up
+    for _ in $(seq 1 20); do
+        up && break
+        sleep 0.5
+    done
+    if ! up; then
+        echo "Failed to start server — see $LOGFILE" >&2
+        exit 1
+    fi
 fi
-if [[ "$create_desktop" =~ ^[Yy]$ ]]; then
+
+nohup xdg-open "$BASE_URL" >/dev/null 2>&1 &
+disown
+EOF
+  chmod +x launch.sh
+  echo -e "${GREEN}✓${NC} launch.sh created"
+fi
+
+echo ""
+read -r -p "Install menu launcher, 'camcorder' command, and boot-time service? [Y/n] " want_launchers
+if [ -t 0 ] || [ -z "$want_launchers" ]; then want_launchers="y"; fi
+if [[ "$want_launchers" =~ ^[Nn]$ ]]; then
+  echo -e "${YELLOW}!${NC} Skipping launcher/service install."
+else
   SCRIPT_DIR="$(pwd)"
+
+  # 1. Desktop launcher (app menu entry) — points at launch.sh
   DESKTOP_FILE="$HOME/.local/share/applications/canon-import.desktop"
+  mkdir -p "$HOME/.local/share/applications"
   cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Name=Canon Import Tool
-Comment=AVCHD camera import utility
-Exec=bash -c 'cd "$SCRIPT_DIR" && ./venv/bin/python app.py & sleep 2 && xdg-open http://localhost:8080'
+Comment=Import AVCHD footage, browse archive, upload to Glacier
+Exec=$SCRIPT_DIR/launch.sh
 Icon=camera-video
 Terminal=false
 Type=Application
 Categories=AudioVideo;
 EOF
   chmod +x "$DESKTOP_FILE"
-  echo -e "${GREEN}✓${NC} Desktop launcher created: $DESKTOP_FILE"
+  echo -e "${GREEN}✓${NC} App menu launcher: $DESKTOP_FILE"
+
+  # 2. Command-line shortcut
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$SCRIPT_DIR/launch.sh" "$HOME/.local/bin/camcorder"
+  echo -e "${GREEN}✓${NC} Terminal command: ~/.local/bin/camcorder"
+
+  # 3. User-level systemd service — starts on boot, auto-restarts on crash
+  SERVICE_DIR="$HOME/.config/systemd/user"
+  mkdir -p "$SERVICE_DIR"
+  cat > "$SERVICE_DIR/canon-import.service" <<EOF
+[Unit]
+Description=Canon Import Tool (Flask web UI on port 8080)
+After=default.target
+
+[Service]
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=$SCRIPT_DIR/venv/bin/python app.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user enable --now canon-import.service
+  echo -e "${GREEN}✓${NC} User service installed and running (systemctl --user status canon-import)"
+
+  # Linger = user services start at boot even without a login session
+  loginctl enable-linger "$USER" 2>/dev/null || true
+  if [ "$(loginctl show-user "$USER" -p Linger 2>/dev/null | cut -d= -f2)" = "yes" ]; then
+    echo -e "${GREEN}✓${NC} Boot auto-start enabled (linger=yes)"
+  else
+    echo -e "${YELLOW}!${NC} Could not enable linger — run: loginctl enable-linger $USER"
+  fi
 fi
+
+echo ""
+echo "Stop a running manual copy before switching to the service:"
+echo "  pkill -f 'venv/bin/python app.py'"
+echo ""
 
 echo ""
 echo -e "${GREEN}Setup complete.${NC}"
